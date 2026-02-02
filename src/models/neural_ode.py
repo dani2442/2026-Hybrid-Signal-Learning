@@ -2,6 +2,7 @@
 
 from typing import List, Optional, Callable
 import numpy as np
+import torch
 from tqdm.auto import tqdm
 
 from .base import BaseModel
@@ -73,7 +74,7 @@ class NeuralODE(BaseModel):
 
         return model
 
-    def _integrate_step(self, x: "torch.Tensor", u: "torch.Tensor") -> "torch.Tensor":
+    def _integrate_step(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
         """Single integration step using selected solver."""
         import torch
 

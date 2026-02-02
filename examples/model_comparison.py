@@ -12,12 +12,12 @@ This script demonstrates how to use the control_helon library to:
 import os
 import numpy as np
 
-from control_helon import (
+from src import (
     NARX, ARIMA, NeuralNetwork, NeuralODE, ExponentialSmoothing, RandomForest, GRU,
     Dataset, Metrics,
     plot_predictions, plot_residuals, plot_signals, plot_model_comparison,
 )
-from control_helon.validation.metrics import compare_models
+from src.validation.metrics import compare_models
 
 # Output directory for images
 IMAGES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "images")
