@@ -37,30 +37,29 @@ Motor electrical constants:
 
 Equation:
 
-\[
+$$
 J\ddot{\theta} + R\dot{\theta} + K(\theta + \delta) = \tau V
-\]
+$$
 
 Rearranged for identification:
 
-\[
+$$
 \ddot{\theta} = -\frac{R}{J}\dot{\theta} - \frac{K}{J}\theta + \frac{\tau}{J}V - \frac{K}{J}\delta
-\]
+$$
 
 Implementation details:
 
 - `theta_dot` and `theta_ddot` are estimated from sampled `y` using finite differences.
-- A linear regression provides initialization for:
+- A linear regression estimates:
   - `a1 = R/J`
   - `a0 = K/J`
   - `b0 = tau/J`
   - `bias = -(K/J)delta`
-- The physical parameters (`J`, `R`, `K`, optional `delta`) are then refined with
-  gradient descent (`nn.Parameter`) by minimizing free-run error through
-  `torchsde` integration.
-- Training/integration now reuse shared utilities in
-  `src/models/torchsde_utils.py` to avoid duplicated control interpolation and
-  optimizer loop code.
+- Physical parameters are recovered as:
+  - `J = tau / b0`
+  - `R = a1 * J`
+  - `K = a0 * J`
+  - `delta = -bias / a0`
 
 Prediction:
 
@@ -72,44 +71,44 @@ Prediction:
 
 ### Geometry
 
-\[
+$$
 S(\theta)=\sqrt{(R+r)^2-e^2\sin^2\theta}
-\]
-\[
+$$
+$$
 y(\theta)=S(\theta)-e\cos\theta-(R+r-e)
-\]
-\[
+$$
+$$
 \sin\phi(\theta)=\frac{e\sin\theta}{R+r}
-\]
-\[
+$$
+$$
 \cos\phi(\theta)=\sqrt{1-\sin^2\phi(\theta)}
-\]
+$$
 
 Define:
 
-\[
+$$
 A(\theta)=\frac{dy}{d\theta}
 =-\frac{e^2\sin\theta\cos\theta}{S(\theta)}+e\sin\theta
-\]
-\[
+$$
+$$
 B(\theta)=\frac{d^2y}{d\theta^2}
 =e\cos\theta
 -\frac{e^2(\cos^2\theta-\sin^2\theta)}{S(\theta)}
 -\frac{e^4\sin^2\theta\cos^2\theta}{S(\theta)^3}
-\]
+$$
 
 ### Coupled dynamics
 
-\[
+$$
 \left(J+\frac{4I}{L^2\cos\phi}A\right)\ddot{\theta}
 +\frac{4I}{L^2\cos\phi}B\dot{\theta}^2
 +\frac{2k}{L\cos\phi}y
 =k_t i-\frac{2k}{L\cos\phi}\delta
-\]
+$$
 
 Equivalent acceleration form:
 
-\[
+$$
 \ddot{\theta}
 =\frac{
 k_t i
@@ -118,24 +117,22 @@ k_t i
 }{
 J+\frac{4I}{L^2\cos\phi}A
 }
-\]
+$$
 
 Electrical subsystem:
 
-\[
+$$
 \dot{i}= -\frac{R_M}{L_M}i + \frac{k_b}{L_M}\dot{\theta} + \frac{u}{L_M}
-\]
+$$
 
 ### Implemented assumptions
 
-- Numerical integration uses `torchsde` with Euler method and zero diffusion
-  (`g(x,t)=0`), i.e., deterministic ODE trajectories solved in the SDE API.
+- Numerical integration uses explicit Euler with sample time `dt`.
 - Output is modeled as `theta` (same signal used for fitting/prediction API).
 - Parameters listed in `trainable_params` are optimized by minimizing free-run
   MSE with Adam (PyTorch).
 - Positive physical parameters are constrained with softplus.
 - Small epsilon guards avoid divisions near singular geometry points.
-- Training uses the same shared TorchSDE utilities as Model 1.
 
 ## Practical Notes
 
@@ -144,5 +141,3 @@ Electrical subsystem:
   trainable subset (`J`, `k`, `delta`, `k_t`) before adding more parameters.
 - If training diverges, reduce learning rate and/or epochs and inspect
   `training_loss_`.
-- For experiment tracking, pass a `wandb_run` object to `fit(...)`; models log
-  per-epoch `train/loss`, `train/grad_norm`, and decoded parameters.
