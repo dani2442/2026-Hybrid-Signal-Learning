@@ -1,7 +1,8 @@
-"""Neural ODE model solved with torchsde and zero diffusion."""
+"""Neural SDE model with learned drift and diffusion."""
 
 from __future__ import annotations
 
+from itertools import chain
 from typing import List
 
 import numpy as np
@@ -10,8 +11,8 @@ from tqdm.auto import tqdm
 from .base import BaseModel
 
 
-class _ControlledNeuralODEFunc:
-    """SDE function wrapper for drift-only dynamics with piecewise-constant input."""
+class _ControlledNeuralSDEFunc:
+    """SDE function with piecewise-constant control input."""
 
     noise_type = "diagonal"
     sde_type = "ito"
@@ -21,6 +22,7 @@ class _ControlledNeuralODEFunc:
         state_dim: int,
         input_dim: int,
         hidden_layers: List[int],
+        diffusion_hidden_layers: List[int],
         dt: float,
     ):
         import torch
@@ -30,37 +32,64 @@ class _ControlledNeuralODEFunc:
         self.state_dim = int(state_dim)
         self.input_dim = int(input_dim)
 
-        input_size = self.state_dim + self.input_dim
+        self.drift_net = self._build_network(
+            input_size=self.state_dim + self.input_dim,
+            output_size=self.state_dim,
+            hidden_layers=hidden_layers,
+            final_bias=0.0,
+        )
+        self.diffusion_net = self._build_network(
+            input_size=self.state_dim + self.input_dim,
+            output_size=self.state_dim,
+            hidden_layers=diffusion_hidden_layers,
+            final_bias=-3.0,
+        )
+        self._u_path = torch.zeros(2, self.input_dim)
+
+    @staticmethod
+    def _build_network(
+        input_size: int,
+        output_size: int,
+        hidden_layers: List[int],
+        final_bias: float,
+    ):
+        import torch.nn as nn
+
         layers = []
         prev_size = input_size
         for hidden_size in hidden_layers:
             layers.append(nn.Linear(prev_size, hidden_size))
             layers.append(nn.Tanh())
             prev_size = hidden_size
-        layers.append(nn.Linear(prev_size, self.state_dim))
-        self.drift_net = nn.Sequential(*layers)
+        layers.append(nn.Linear(prev_size, output_size))
+        net = nn.Sequential(*layers)
 
-        for module in self.drift_net.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_normal_(module.weight)
-                if module.bias is not None:
+        linear_layers = [m for m in net.modules() if isinstance(m, nn.Linear)]
+        for idx, module in enumerate(linear_layers):
+            nn.init.xavier_normal_(module.weight)
+            if module.bias is not None:
+                if idx == len(linear_layers) - 1:
+                    nn.init.constant_(module.bias, final_bias)
+                else:
                     nn.init.zeros_(module.bias)
-
-        self._u_path = torch.zeros(2, self.input_dim)
+        return net
 
     def to(self, device):
         self.drift_net = self.drift_net.to(device)
+        self.diffusion_net = self.diffusion_net.to(device)
         self._u_path = self._u_path.to(device)
         return self
 
     def parameters(self):
-        return self.drift_net.parameters()
+        return chain(self.drift_net.parameters(), self.diffusion_net.parameters())
 
     def train(self):
         self.drift_net.train()
+        self.diffusion_net.train()
 
     def eval(self):
         self.drift_net.eval()
+        self.diffusion_net.eval()
 
     def set_control(self, u_path):
         self._u_path = u_path
@@ -83,30 +112,31 @@ class _ControlledNeuralODEFunc:
 
     def g(self, t, y):
         import torch
+        import torch.nn.functional as F
 
-        return torch.zeros_like(y)
+        u_t = self._u_at(t, y.shape[0])
+        xu = torch.cat([y, u_t], dim=-1)
+        return F.softplus(self.diffusion_net(xu)) + 1e-6
 
 
-class NeuralODE(BaseModel):
+class NeuralSDE(BaseModel):
     """
-    Neural ODE for continuous-time system identification solved with torchsde.
+    Neural SDE for continuous-time system identification.
 
     Dynamics:
-        dx = f_theta(x, u) dt
+        dx = f_theta(x, u) dt + g_phi(x, u) dW_t
+    where both drift f_theta and diffusion g_phi are learned.
     """
 
-    _SOLVER_MAP = {
-        "euler": "euler",
-        "rk4": "euler",
-        "dopri5": "euler",
-    }
+    _SUPPORTED_SOLVERS = {"euler", "milstein", "srk"}
 
     def __init__(
         self,
         state_dim: int = 1,
         input_dim: int = 1,
         hidden_layers: List[int] = [64, 64],
-        solver: str = "rk4",
+        diffusion_hidden_layers: List[int] = [64, 64],
+        solver: str = "euler",
         dt: float = 0.05,
         learning_rate: float = 1e-3,
         epochs: int = 100,
@@ -115,18 +145,19 @@ class NeuralODE(BaseModel):
         self.state_dim = int(state_dim)
         self.input_dim = int(input_dim)
         self.hidden_layers = list(hidden_layers)
+        self.diffusion_hidden_layers = list(diffusion_hidden_layers)
         self.solver = solver
         self.dt = float(dt)
         self.learning_rate = float(learning_rate)
         self.epochs = int(epochs)
 
+        if self.solver not in self._SUPPORTED_SOLVERS:
+            supported = ", ".join(sorted(self._SUPPORTED_SOLVERS))
+            raise ValueError(f"Unknown solver: {self.solver}. Supported: {supported}")
+
         self.sde_func_ = None
         self._device = None
         self._dtype = None
-
-        if self.solver not in self._SOLVER_MAP:
-            supported = ", ".join(sorted(self._SOLVER_MAP.keys()))
-            raise ValueError(f"Unknown solver: {self.solver}. Supported: {supported}")
 
     def _simulate_trajectory(self, u_path, x0):
         try:
@@ -144,7 +175,7 @@ class NeuralODE(BaseModel):
             self.sde_func_,
             x0_batch,
             ts,
-            method=self._SOLVER_MAP[self.solver],
+            method=self.solver,
             dt=self.dt,
         )
         return x_path[:, 0, :]
@@ -162,8 +193,8 @@ class NeuralODE(BaseModel):
         y: np.ndarray,
         verbose: bool = True,
         sequence_length: int = 20,
-    ) -> "NeuralODE":
-        """Train model parameters by backpropagating through torchsde integration."""
+    ) -> "NeuralSDE":
+        """Train drift and diffusion networks by backprop through torchsde."""
         try:
             import torch
             import torch.nn as nn
@@ -181,10 +212,11 @@ class NeuralODE(BaseModel):
 
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._dtype = torch.float32
-        self.sde_func_ = _ControlledNeuralODEFunc(
+        self.sde_func_ = _ControlledNeuralSDEFunc(
             state_dim=self.state_dim,
             input_dim=self.input_dim,
             hidden_layers=self.hidden_layers,
+            diffusion_hidden_layers=self.diffusion_hidden_layers,
             dt=self.dt,
         ).to(self._device)
 
@@ -193,7 +225,7 @@ class NeuralODE(BaseModel):
 
         epoch_iter = range(self.epochs)
         if verbose:
-            epoch_iter = tqdm(epoch_iter, desc="Training NeuralODE", unit="epoch")
+            epoch_iter = tqdm(epoch_iter, desc="Training NeuralSDE", unit="epoch")
 
         for _ in epoch_iter:
             self.sde_func_.train()
@@ -222,7 +254,7 @@ class NeuralODE(BaseModel):
         return self
 
     def predict_osa(self, u: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """One-step-ahead prediction using measured states."""
+        """One-step-ahead prediction using measured state at each step."""
         import torch
 
         u = np.asarray(u, dtype=float).reshape(-1, self.input_dim)
@@ -246,7 +278,7 @@ class NeuralODE(BaseModel):
         show_progress: bool = True,
     ) -> np.ndarray:
         """Free-run simulation from initial condition."""
-        del show_progress  # retained for compatibility
+        del show_progress  # retained for API compatibility
         import torch
 
         u = np.asarray(u, dtype=float).reshape(-1, self.input_dim)
@@ -261,6 +293,8 @@ class NeuralODE(BaseModel):
 
     def __repr__(self) -> str:
         return (
-            f"NeuralODE(state_dim={self.state_dim}, input_dim={self.input_dim}, "
-            f"hidden_layers={self.hidden_layers}, solver='{self.solver}')"
+            f"NeuralSDE(state_dim={self.state_dim}, input_dim={self.input_dim}, "
+            f"hidden_layers={self.hidden_layers}, "
+            f"diffusion_hidden_layers={self.diffusion_hidden_layers}, "
+            f"solver='{self.solver}')"
         )

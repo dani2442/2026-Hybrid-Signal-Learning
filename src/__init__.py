@@ -1,11 +1,22 @@
 """Control System Identification Library."""
 
-from .models import NARX, ARIMA, NeuralNetwork, NeuralODE, ExponentialSmoothing, RandomForest, GRU
+from .models import (
+    ARIMA,
+    GRU,
+    NARX,
+    ExponentialSmoothing,
+    HybridLinearBeam,
+    HybridNonlinearCam,
+    NeuralNetwork,
+    NeuralODE,
+    NeuralSDE,
+    RandomForest,
+)
 from .data import Dataset
 from .visualization import (
-    plot_predictions, 
-    plot_spectrograms, 
-    plot_residuals, 
+    plot_predictions,
+    plot_spectrograms,
+    plot_residuals,
     plot_signals,
     plot_model_comparison,
 )
@@ -17,9 +28,12 @@ __all__ = [
     "ARIMA",
     "NeuralNetwork", 
     "NeuralODE",
+    "NeuralSDE",
     "ExponentialSmoothing",
     "RandomForest",
     "GRU",
+    "HybridLinearBeam",
+    "HybridNonlinearCam",
     "Dataset",
     "Metrics",
     "plot_predictions",
