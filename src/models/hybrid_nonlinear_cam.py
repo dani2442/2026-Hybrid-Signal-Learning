@@ -320,6 +320,7 @@ class HybridNonlinearCam(BaseModel):
                 epochs=self.epochs,
                 learning_rate=self.learning_rate,
                 on_epoch_end=_log_epoch,
+                max_grad_norm=0.5,
             )
 
         self.params_.update(self.sde_func_.decoded_parameter_dict())

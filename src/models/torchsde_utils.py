@@ -63,6 +63,12 @@ def simulate_controlled_sde(
             smaller than *dt* (e.g. ``dt / 10``) so that the integrator
             takes multiple sub-steps between output time points.
     """
+    # When sub-stepping is requested, use a lightweight pure-PyTorch Euler
+    # loop instead of torchsde.sdeint.  This avoids the Brownian tree
+    # recursion limit that torchsde hits when integration_dt << dt.
+    if integration_dt is not None and integration_dt < dt:
+        return _euler_ode_integrate(sde_func, u_path, x0, dt, integration_dt)
+
     try:
         import torch
         import torchsde
@@ -75,6 +81,46 @@ def simulate_controlled_sde(
     step_dt = float(integration_dt) if integration_dt is not None else float(dt)
     path = torchsde.sdeint(sde_func, x0_batch, ts, method=method, dt=step_dt)
     return path[:, 0, :]
+
+
+def _euler_ode_integrate(sde_func, u_path, x0, dt: float, integration_dt: float):
+    """Pure-PyTorch Euler integration for zero-diffusion (ODE) dynamics.
+
+    This avoids the Brownian-tree overhead in *torchsde* and supports
+    arbitrary sub-stepping without recursion-depth issues.
+
+    Args:
+        sde_func: Object with ``f(t, y)`` and ``set_control(u_path)`` methods.
+        u_path: Control input tensor of shape ``[T, input_dim]``.
+        x0: Initial state tensor of shape ``[state_dim]`` or ``[1, state_dim]``.
+        dt: Sampling time (spacing of the output grid).
+        integration_dt: Internal Euler step size (must be <= *dt*).
+
+    Returns:
+        Tensor of shape ``[T, state_dim]`` with the state at each output time.
+    """
+    import torch
+
+    sde_func.set_control(u_path)
+    n_steps = u_path.shape[0]
+    substeps = max(1, round(dt / integration_dt))
+    dt_sub = dt / substeps
+
+    x = x0.reshape(1, -1).clone()            # [1, state_dim]
+    trajectory = [x.squeeze(0).clone()]       # store t=0
+
+    for i in range(1, n_steps):
+        # Within each sampling interval, the control is piecewise-constant
+        # at the value for time-index i-1.  The f() lookup uses real time.
+        t_start = (i - 1) * dt
+        for j in range(substeps):
+            t_j = t_start + j * dt_sub
+            t_tensor = torch.tensor(t_j, dtype=u_path.dtype, device=u_path.device)
+            dx = sde_func.f(t_tensor, x)
+            x = x + dx * dt_sub
+        trajectory.append(x.squeeze(0).clone())
+
+    return torch.stack(trajectory, dim=0)     # [T, state_dim]
 
 
 def optimize_with_adam(
@@ -119,6 +165,20 @@ def optimize_with_adam(
             continue
 
         loss.backward()
+
+        # Discard the entire step when any gradient is NaN/Inf – this can
+        # happen when back-propagating through stiff ODE/SDE trajectories
+        # even when the forward loss is finite.
+        if any(
+            p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any())
+            for p in params
+        ):
+            optimizer.zero_grad()
+            loss_value = float(loss.detach().cpu().item())
+            history.append(loss_value)
+            if on_epoch_end is not None:
+                on_epoch_end(epoch + 1, loss_value, 0.0)
+            continue
 
         if max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(params, float(max_grad_norm))

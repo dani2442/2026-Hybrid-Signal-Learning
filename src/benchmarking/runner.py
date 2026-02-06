@@ -120,8 +120,9 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
                 R_M=2.0,
                 L_M=0.01,
                 trainable_params=("J", "k", "delta", "k_t"),
-                learning_rate=2e-2,
+                learning_rate=1e-3,
                 epochs=400,
+                integration_substeps=50,
             ),
         ),
     }
