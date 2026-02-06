@@ -5,12 +5,16 @@ from __future__ import annotations
 from typing import List
 
 import numpy as np
-from tqdm.auto import tqdm
 
 from .base import BaseModel
+from .torchsde_utils import (
+    ControlledPathMixin,
+    simulate_controlled_sde,
+    train_sequence_batches,
+)
 
 
-class _ControlledNeuralODEFunc:
+class _ControlledNeuralODEFunc(ControlledPathMixin):
     """SDE function wrapper for drift-only dynamics with piecewise-constant input."""
 
     noise_type = "diagonal"
@@ -26,7 +30,6 @@ class _ControlledNeuralODEFunc:
         import torch
         import torch.nn as nn
 
-        self.dt = float(dt)
         self.state_dim = int(state_dim)
         self.input_dim = int(input_dim)
 
@@ -46,7 +49,12 @@ class _ControlledNeuralODEFunc:
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
-        self._u_path = torch.zeros(2, self.input_dim)
+        self._init_control_path(
+            dt=dt,
+            input_dim=self.input_dim,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
 
     def to(self, device):
         self.drift_net = self.drift_net.to(device)
@@ -61,18 +69,6 @@ class _ControlledNeuralODEFunc:
 
     def eval(self):
         self.drift_net.eval()
-
-    def set_control(self, u_path):
-        self._u_path = u_path
-
-    def _u_at(self, t, batch_size):
-        import torch
-
-        idx = torch.clamp((t / self.dt).long(), min=0, max=self._u_path.shape[0] - 1)
-        u_t = self._u_path[idx]
-        if u_t.ndim == 1:
-            u_t = u_t.unsqueeze(0)
-        return u_t.expand(batch_size, -1)
 
     def f(self, t, y):
         import torch
@@ -123,31 +119,20 @@ class NeuralODE(BaseModel):
         self.sde_func_ = None
         self._device = None
         self._dtype = None
+        self.training_loss_: list[float] = []
 
         if self.solver not in self._SOLVER_MAP:
             supported = ", ".join(sorted(self._SOLVER_MAP.keys()))
             raise ValueError(f"Unknown solver: {self.solver}. Supported: {supported}")
 
     def _simulate_trajectory(self, u_path, x0):
-        try:
-            import torch
-            import torchsde
-        except ImportError:
-            raise ImportError("torchsde required. Install with: pip install torchsde")
-
-        self.sde_func_.set_control(u_path)
-        ts = torch.arange(
-            u_path.shape[0], dtype=u_path.dtype, device=u_path.device
-        ) * self.dt
-        x0_batch = x0.reshape(1, self.state_dim)
-        x_path = torchsde.sdeint(
-            self.sde_func_,
-            x0_batch,
-            ts,
-            method=self._SOLVER_MAP[self.solver],
+        return simulate_controlled_sde(
+            sde_func=self.sde_func_,
+            u_path=u_path,
+            x0=x0,
             dt=self.dt,
+            method=self._SOLVER_MAP[self.solver],
         )
-        return x_path[:, 0, :]
 
     def _integrate_one_step(self, x_t, u_t):
         import torch
@@ -162,22 +147,17 @@ class NeuralODE(BaseModel):
         y: np.ndarray,
         verbose: bool = True,
         sequence_length: int = 20,
+        wandb_run=None,
+        wandb_log_every: int = 1,
     ) -> "NeuralODE":
         """Train model parameters by backpropagating through torchsde integration."""
         try:
             import torch
-            import torch.nn as nn
-            import torch.optim as optim
         except ImportError:
             raise ImportError("PyTorch required. Install with: pip install torch")
 
         u = np.asarray(u, dtype=float).reshape(-1, self.input_dim)
         y = np.asarray(y, dtype=float).reshape(-1, self.state_dim)
-
-        n_samples = len(y)
-        n_sequences = n_samples - sequence_length
-        if n_sequences <= 0:
-            raise ValueError("Not enough data for given sequence length")
 
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._dtype = torch.float32
@@ -188,35 +168,23 @@ class NeuralODE(BaseModel):
             dt=self.dt,
         ).to(self._device)
 
-        optimizer = optim.Adam(self.sde_func_.parameters(), lr=self.learning_rate)
-        criterion = nn.MSELoss()
-
-        epoch_iter = range(self.epochs)
-        if verbose:
-            epoch_iter = tqdm(epoch_iter, desc="Training NeuralODE", unit="epoch")
-
-        for _ in epoch_iter:
-            self.sde_func_.train()
-            total_loss = 0.0
-            indices = np.random.permutation(n_sequences)[: min(100, n_sequences)]
-
-            for idx in indices:
-                y_seq = torch.tensor(
-                    y[idx : idx + sequence_length], dtype=self._dtype, device=self._device
-                )
-                u_seq = torch.tensor(
-                    u[idx : idx + sequence_length], dtype=self._dtype, device=self._device
-                )
-
-                optimizer.zero_grad()
-                pred_seq = self._simulate_trajectory(u_path=u_seq, x0=y_seq[0])
-                loss = criterion(pred_seq, y_seq)
-                loss.backward()
-                optimizer.step()
-                total_loss += float(loss.detach().cpu().item())
-
-            if verbose and hasattr(epoch_iter, "set_postfix"):
-                epoch_iter.set_postfix(loss=total_loss / len(indices))
+        self.training_loss_ = train_sequence_batches(
+            sde_func=self.sde_func_,
+            simulate_fn=lambda u_seq, x0: self._simulate_trajectory(u_seq, x0),
+            u=u,
+            y=y,
+            input_dim=self.input_dim,
+            state_dim=self.state_dim,
+            sequence_length=sequence_length,
+            epochs=self.epochs,
+            learning_rate=self.learning_rate,
+            device=self._device,
+            dtype=self._dtype,
+            verbose=verbose,
+            progress_desc="Training NeuralODE",
+            wandb_run=wandb_run,
+            wandb_log_every=wandb_log_every,
+        )
 
         self._is_fitted = True
         return self

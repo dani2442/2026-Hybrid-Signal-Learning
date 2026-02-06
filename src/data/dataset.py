@@ -132,6 +132,34 @@ def _estimate_y_dot(
     raise ValueError(f"Unknown y_dot estimation method: {method}")
 
 
+def _slice_optional(arr: Optional[np.ndarray], start: int, end: int) -> Optional[np.ndarray]:
+    """Slice optional array safely."""
+    if arr is None:
+        return None
+    return arr[start:end]
+
+
+def _downsample_optional(arr: Optional[np.ndarray], factor: int) -> Optional[np.ndarray]:
+    """Downsample optional array when factor > 1."""
+    if arr is None or factor <= 1:
+        return arr
+    return arr[::factor]
+
+
+def _shift_time_to_zero(t: np.ndarray) -> np.ndarray:
+    """Shift time vector so it starts at zero."""
+    if len(t) == 0:
+        return t
+    return t - t[0]
+
+
+def _estimate_dt_and_fs(t: np.ndarray, default_fs: float = 1.0) -> tuple[float, float]:
+    """Estimate sampling time and rate from time vector."""
+    dt = np.median(np.diff(t)) if len(t) > 1 else 1.0
+    fs = 1.0 / dt if dt > 0 else float(default_fs)
+    return float(dt), float(fs)
+
+
 @dataclass
 class Dataset:
     """
@@ -193,6 +221,42 @@ class Dataset:
         return sorted(BAB_DATASET_REGISTRY.keys())
 
     @classmethod
+    def _build_dataset(
+        cls,
+        t: np.ndarray,
+        u: np.ndarray,
+        y: np.ndarray,
+        name: str,
+        y_ref: Optional[np.ndarray] = None,
+        y_filt: Optional[np.ndarray] = None,
+        trigger: Optional[np.ndarray] = None,
+        y_dot_method: str = "savgol",
+        savgol_window: int = 51,
+        savgol_poly: int = 3,
+        fallback_fs: float = 1.0,
+    ) -> "Dataset":
+        """Create a Dataset with consistent dt/fs/y_dot handling."""
+        dt, fs = _estimate_dt_and_fs(t, default_fs=fallback_fs)
+        y_dot = _estimate_y_dot(
+            y,
+            dt if dt > 0 else 1.0,
+            method=y_dot_method,
+            savgol_window=savgol_window,
+            savgol_poly=savgol_poly,
+        )
+        return cls(
+            t=t,
+            u=u,
+            y=y,
+            y_ref=y_ref,
+            y_dot=y_dot,
+            y_filt=y_filt,
+            trigger=trigger,
+            name=name,
+            sampling_rate=fs,
+        )
+
+    @classmethod
     def from_mat(
         cls,
         filepath: str,
@@ -240,20 +304,15 @@ class Dataset:
         if y_filt_key in data and data[y_filt_key].size > 0:
             y_filt = data[y_filt_key].flatten()
 
-        dt = np.median(np.diff(t))
-        fs = 1.0 / dt if dt > 0 else 1.0
-        y_dot = _estimate_y_dot(y, dt if dt > 0 else 1.0, method="savgol")
-
-        return cls(
+        return cls._build_dataset(
             t=t,
             u=u,
             y=y,
+            name=os.path.basename(filepath),
             y_ref=y_ref,
-            y_dot=y_dot,
             y_filt=y_filt,
             trigger=trigger,
-            name=os.path.basename(filepath),
-            sampling_rate=fs,
+            y_dot_method="savgol",
         )
 
     @classmethod
@@ -352,24 +411,17 @@ class Dataset:
         y_filt = np.asarray(data["yf"]).flatten() if "yf" in data else None
 
         if not preprocess:
-            dt_full = np.median(np.diff(t))
-            y_dot_full = _estimate_y_dot(
-                y,
-                dt_full if dt_full > 0 else 1.0,
-                method=y_dot_method,
-                savgol_window=savgol_window,
-                savgol_poly=savgol_poly,
-            )
-            return cls(
+            return cls._build_dataset(
                 t=t,
                 u=u,
                 y=y,
                 y_ref=y_ref,
-                y_dot=y_dot_full,
                 y_filt=y_filt,
                 trigger=trigger,
                 name=resolved,
-                sampling_rate=1.0 / dt_full if dt_full > 0 else 1.0,
+                y_dot_method=y_dot_method,
+                savgol_window=savgol_window,
+                savgol_poly=savgol_poly,
             )
 
         start_idx = _find_trigger_start(trigger)
@@ -378,51 +430,33 @@ class Dataset:
             processed_end = _find_end_before_ref_zero(y_ref, tolerance=end_ref_tolerance)
             if processed_end <= start_idx:
                 processed_end = len(t)
-        processed_end = min(processed_end, len(t))
+        processed_end = min(int(processed_end), len(t))
 
         t = t[start_idx:processed_end]
         u = u[start_idx:processed_end]
         y = y[start_idx:processed_end]
-        if y_ref is not None:
-            y_ref = y_ref[start_idx:processed_end]
-        if y_filt is not None:
-            y_filt = y_filt[start_idx:processed_end]
-        if trigger is not None:
-            trigger = trigger[start_idx:processed_end]
+        y_ref = _slice_optional(y_ref, start_idx, processed_end)
+        y_filt = _slice_optional(y_filt, start_idx, processed_end)
+        trigger = _slice_optional(trigger, start_idx, processed_end)
 
-        if resample_factor > 1:
-            t = t[::resample_factor]
-            u = u[::resample_factor]
-            y = y[::resample_factor]
-            if y_ref is not None:
-                y_ref = y_ref[::resample_factor]
-            if y_filt is not None:
-                y_filt = y_filt[::resample_factor]
-            if trigger is not None:
-                trigger = trigger[::resample_factor]
+        t = _downsample_optional(t, resample_factor)
+        u = _downsample_optional(u, resample_factor)
+        y = _downsample_optional(y, resample_factor)
+        y_ref = _downsample_optional(y_ref, resample_factor)
+        y_filt = _downsample_optional(y_filt, resample_factor)
+        trigger = _downsample_optional(trigger, resample_factor)
 
-        if len(t) > 0:
-            t = t - t[0]
-
-        dt = np.median(np.diff(t)) if len(t) > 1 else 1.0
-        y_dot = _estimate_y_dot(
-            y,
-            dt if dt > 0 else 1.0,
-            method=y_dot_method,
-            savgol_window=savgol_window,
-            savgol_poly=savgol_poly,
-        )
-
-        return cls(
-            t=t,
+        return cls._build_dataset(
+            t=_shift_time_to_zero(t),
             u=u,
             y=y,
+            name=resolved,
             y_ref=y_ref,
-            y_dot=y_dot,
             y_filt=y_filt,
             trigger=trigger,
-            name=resolved,
-            sampling_rate=1.0 / dt if dt > 0 else 1.0,
+            y_dot_method=y_dot_method,
+            savgol_window=savgol_window,
+            savgol_poly=savgol_poly,
         )
 
     def preprocess(
@@ -460,20 +494,16 @@ class Dataset:
         t = self.t[s_idx:e_idx]
         u = self.u[s_idx:e_idx]
         y = self.y[s_idx:e_idx]
-        y_ref = self.y_ref[s_idx:e_idx] if self.y_ref is not None else None
-        y_filt = self.y_filt[s_idx:e_idx] if self.y_filt is not None else None
-        trigger = self.trigger[s_idx:e_idx] if self.trigger is not None else None
+        y_ref = _slice_optional(self.y_ref, s_idx, e_idx)
+        y_filt = _slice_optional(self.y_filt, s_idx, e_idx)
+        trigger = _slice_optional(self.trigger, s_idx, e_idx)
 
-        if resample_factor > 1:
-            t = t[::resample_factor]
-            u = u[::resample_factor]
-            y = y[::resample_factor]
-            if y_ref is not None:
-                y_ref = y_ref[::resample_factor]
-            if y_filt is not None:
-                y_filt = y_filt[::resample_factor]
-            if trigger is not None:
-                trigger = trigger[::resample_factor]
+        t = _downsample_optional(t, resample_factor)
+        u = _downsample_optional(u, resample_factor)
+        y = _downsample_optional(y, resample_factor)
+        y_ref = _downsample_optional(y_ref, resample_factor)
+        y_filt = _downsample_optional(y_filt, resample_factor)
+        trigger = _downsample_optional(trigger, resample_factor)
 
         if detrend:
             u = u - np.mean(u)
@@ -494,23 +524,34 @@ class Dataset:
             if y_filt is not None:
                 y_filt = (y_filt - y_mean) / y_std
 
-        if len(t) > 0:
-            t = t - t[0]
-
-        dt = np.median(np.diff(t)) if len(t) > 1 else 1.0
-        y_dot = _estimate_y_dot(y, dt if dt > 0 else 1.0, method="central")
-        new_fs = 1.0 / dt if dt > 0 else self.sampling_rate / max(resample_factor, 1)
-
-        return Dataset(
-            t=t,
+        fallback_fs = self.sampling_rate / max(resample_factor, 1)
+        return type(self)._build_dataset(
+            t=_shift_time_to_zero(t),
             u=u,
             y=y,
+            name=self.name,
             y_ref=y_ref,
-            y_dot=y_dot,
             y_filt=y_filt,
             trigger=trigger,
-            name=self.name,
-            sampling_rate=new_fs,
+            y_dot_method="central",
+            fallback_fs=fallback_fs,
+        )
+
+    def _subset(self, start: int, end: int, name: str, reset_time: bool = False) -> "Dataset":
+        """Return sliced dataset view with optional time reset."""
+        t = self.t[start:end]
+        if reset_time:
+            t = _shift_time_to_zero(t)
+        return Dataset(
+            t=t,
+            u=self.u[start:end],
+            y=self.y[start:end],
+            y_ref=_slice_optional(self.y_ref, start, end),
+            y_dot=_slice_optional(self.y_dot, start, end),
+            y_filt=_slice_optional(self.y_filt, start, end),
+            trigger=_slice_optional(self.trigger, start, end),
+            name=name,
+            sampling_rate=self.sampling_rate,
         )
 
     def split(self, ratio: float = 0.8) -> Tuple["Dataset", "Dataset"]:
@@ -526,30 +567,8 @@ class Dataset:
         n = len(self.t)
         split_idx = int(n * ratio)
 
-        train = Dataset(
-            t=self.t[:split_idx],
-            u=self.u[:split_idx],
-            y=self.y[:split_idx],
-            y_ref=self.y_ref[:split_idx] if self.y_ref is not None else None,
-            y_dot=self.y_dot[:split_idx] if self.y_dot is not None else None,
-            y_filt=self.y_filt[:split_idx] if self.y_filt is not None else None,
-            trigger=self.trigger[:split_idx] if self.trigger is not None else None,
-            name=f"{self.name}_train",
-            sampling_rate=self.sampling_rate,
-        )
-
-        t_test = self.t[split_idx:] - self.t[split_idx] if split_idx < len(self.t) else np.array([])
-        test = Dataset(
-            t=t_test,
-            u=self.u[split_idx:],
-            y=self.y[split_idx:],
-            y_ref=self.y_ref[split_idx:] if self.y_ref is not None else None,
-            y_dot=self.y_dot[split_idx:] if self.y_dot is not None else None,
-            y_filt=self.y_filt[split_idx:] if self.y_filt is not None else None,
-            trigger=self.trigger[split_idx:] if self.trigger is not None else None,
-            name=f"{self.name}_test",
-            sampling_rate=self.sampling_rate,
-        )
+        train = self._subset(0, split_idx, name=f"{self.name}_train")
+        test = self._subset(split_idx, n, name=f"{self.name}_test", reset_time=True)
 
         return train, test
 

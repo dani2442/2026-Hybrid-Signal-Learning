@@ -13,6 +13,13 @@ from .models import (
     RandomForest,
 )
 from .data import Dataset
+from .benchmarking import (
+    BenchmarkCase,
+    BenchmarkConfig,
+    BenchmarkRunner,
+    build_benchmark_cases,
+    summarize_results,
+)
 from .visualization import (
     plot_predictions,
     plot_spectrograms,
@@ -26,7 +33,7 @@ __version__ = "0.1.0"
 __all__ = [
     "NARX",
     "ARIMA",
-    "NeuralNetwork", 
+    "NeuralNetwork",
     "NeuralODE",
     "NeuralSDE",
     "ExponentialSmoothing",
@@ -34,6 +41,11 @@ __all__ = [
     "GRU",
     "HybridLinearBeam",
     "HybridNonlinearCam",
+    "BenchmarkCase",
+    "BenchmarkConfig",
+    "BenchmarkRunner",
+    "build_benchmark_cases",
+    "summarize_results",
     "Dataset",
     "Metrics",
     "plot_predictions",

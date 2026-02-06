@@ -7,9 +7,15 @@ from typing import Dict
 import numpy as np
 
 from .base import BaseModel
+from .torchsde_utils import (
+    ControlledPathMixin,
+    inverse_softplus,
+    optimize_with_adam,
+    simulate_controlled_sde,
+)
 
 
-class _LinearBeamSDEFunc:
+class _LinearBeamSDEFunc(ControlledPathMixin):
     """SDE drift for beam dynamics with zero diffusion."""
 
     noise_type = "diagonal"
@@ -26,20 +32,31 @@ class _LinearBeamSDEFunc:
         import torch
         import torch.nn as nn
 
-        self.dt = float(sampling_time)
         self.tau = float(tau)
         self.estimate_delta = bool(estimate_delta)
         self._eps = 1e-8
         self._device = device
 
         self.raw_J = nn.Parameter(
-            torch.tensor(self._inv_softplus(init_params["J"]), dtype=torch.float64, device=device)
+            torch.tensor(
+                inverse_softplus(init_params["J"]),
+                dtype=torch.float64,
+                device=device,
+            )
         )
         self.raw_R = nn.Parameter(
-            torch.tensor(self._inv_softplus(init_params["R"]), dtype=torch.float64, device=device)
+            torch.tensor(
+                inverse_softplus(init_params["R"]),
+                dtype=torch.float64,
+                device=device,
+            )
         )
         self.raw_K = nn.Parameter(
-            torch.tensor(self._inv_softplus(init_params["K"]), dtype=torch.float64, device=device)
+            torch.tensor(
+                inverse_softplus(init_params["K"]),
+                dtype=torch.float64,
+                device=device,
+            )
         )
 
         if self.estimate_delta:
@@ -49,14 +66,12 @@ class _LinearBeamSDEFunc:
         else:
             self.delta = torch.tensor(0.0, dtype=torch.float64, device=device)
 
-        self._u_path = torch.zeros(2, 1, dtype=torch.float64, device=device)
-
-    @staticmethod
-    def _inv_softplus(x: float) -> float:
-        x = max(float(x), 1e-8)
-        if x > 30.0:
-            return x
-        return float(np.log(np.expm1(x)))
+        self._init_control_path(
+            dt=sampling_time,
+            input_dim=1,
+            device=device,
+            dtype=torch.float64,
+        )
 
     def parameters(self):
         params = [self.raw_J, self.raw_R, self.raw_K]
@@ -69,20 +84,6 @@ class _LinearBeamSDEFunc:
 
     def eval(self):
         return self
-
-    def set_control(self, u_path):
-        if u_path.ndim == 1:
-            u_path = u_path.reshape(-1, 1)
-        self._u_path = u_path
-
-    def _u_at(self, t, batch_size):
-        import torch
-
-        idx = torch.clamp((t / self.dt).long(), min=0, max=self._u_path.shape[0] - 1)
-        u_t = self._u_path[idx]
-        if u_t.ndim == 1:
-            u_t = u_t.unsqueeze(0)
-        return u_t.expand(batch_size, -1)
 
     def _decoded_params(self):
         import torch.nn.functional as F
@@ -192,31 +193,28 @@ class HybridLinearBeam(BaseModel):
         return {"J": float(J0), "R": float(R0), "K": float(K0), "delta": float(delta0)}
 
     def _simulate_theta_torch(self, u_t, theta0, omega0):
-        try:
-            import torch
-            import torchsde
-        except ImportError:
-            raise ImportError("torchsde required. Install with: pip install torchsde")
+        import torch
 
-        self.sde_func_.set_control(u_t)
-        ts = torch.arange(
-            u_t.shape[0], dtype=torch.float64, device=self._device
-        ) * self.sampling_time
-        x0 = torch.stack([theta0, omega0]).reshape(1, 2)
-        state_path = torchsde.sdeint(
-            self.sde_func_,
-            x0,
-            ts,
-            method="euler",
+        x0 = torch.stack([theta0, omega0])
+        state_path = simulate_controlled_sde(
+            sde_func=self.sde_func_,
+            u_path=u_t,
+            x0=x0,
             dt=self.sampling_time,
+            method="euler",
         )
-        return state_path[:, 0, 0]
+        return state_path[:, 0]
 
-    def fit(self, u: np.ndarray, y: np.ndarray) -> "HybridLinearBeam":
+    def fit(
+        self,
+        u: np.ndarray,
+        y: np.ndarray,
+        wandb_run=None,
+        wandb_log_every: int = 1,
+    ) -> "HybridLinearBeam":
         """Fit physical parameters by gradient descent through torchsde simulation."""
         try:
             import torch
-            import torch.optim as optim
         except ImportError:
             raise ImportError("PyTorch required. Install with: pip install torch")
 
@@ -242,16 +240,33 @@ class HybridLinearBeam(BaseModel):
         theta0 = y_t[0]
         omega0 = (y_t[1] - y_t[0]) / self.sampling_time
 
-        optimizer = optim.Adam(self.sde_func_.parameters(), lr=self.learning_rate)
-        self.training_loss_ = []
-
-        for _ in range(self.epochs):
-            optimizer.zero_grad()
+        def _loss_fn():
             theta_hat = self._simulate_theta_torch(u_t=u_t, theta0=theta0, omega0=omega0)
-            loss = torch.mean((theta_hat[self.max_lag :] - y_t[self.max_lag :]) ** 2)
-            loss.backward()
-            optimizer.step()
-            self.training_loss_.append(float(loss.detach().cpu().item()))
+            return torch.mean((theta_hat[self.max_lag :] - y_t[self.max_lag :]) ** 2)
+
+        def _log_epoch(epoch: int, loss_value: float, grad_norm: float):
+            if wandb_run is None or wandb_log_every <= 0 or epoch % wandb_log_every:
+                return
+            payload = {
+                "train/epoch": epoch,
+                "train/loss": loss_value,
+                "train/grad_norm": grad_norm,
+            }
+            payload.update(
+                {
+                    f"params/{name}": value
+                    for name, value in self.sde_func_.decoded_parameter_dict().items()
+                }
+            )
+            wandb_run.log(payload, step=epoch)
+
+        self.training_loss_ = optimize_with_adam(
+            parameters=self.sde_func_.parameters(),
+            loss_fn=_loss_fn,
+            epochs=self.epochs,
+            learning_rate=self.learning_rate,
+            on_epoch_end=_log_epoch,
+        )
 
         decoded = self.sde_func_.decoded_parameter_dict()
         self.J_ = decoded["J"]

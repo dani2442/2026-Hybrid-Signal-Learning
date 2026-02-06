@@ -7,9 +7,15 @@ from typing import Dict, Iterable
 import numpy as np
 
 from .base import BaseModel
+from .torchsde_utils import (
+    ControlledPathMixin,
+    inverse_softplus,
+    optimize_with_adam,
+    simulate_controlled_sde,
+)
 
 
-class _NonlinearCamSDEFunc:
+class _NonlinearCamSDEFunc(ControlledPathMixin):
     """SDE drift for nonlinear cam-bar-motor model with zero diffusion."""
 
     noise_type = "diagonal"
@@ -22,21 +28,24 @@ class _NonlinearCamSDEFunc:
         params: Dict[str, float],
         trainable_params: Iterable[str],
         device,
+        min_m_eff: float = 1e-3,
+        max_acc: float = 1e4,
     ):
         import torch
         import torch.nn as nn
 
-        self.dt = float(sampling_time)
         self._eps = 1e-8
         self._device = device
         self._trainable = set(trainable_params)
+        self._min_m_eff = float(min_m_eff)
+        self._max_acc = float(max_acc)
 
         self._raw_params: Dict[str, nn.Parameter] = {}
         self._const_params: Dict[str, torch.Tensor] = {}
         for name, value in params.items():
             if name in self._trainable:
                 init_raw = (
-                    self._inv_softplus(value)
+                    inverse_softplus(value)
                     if name in self._POSITIVE_PARAMS
                     else float(value)
                 )
@@ -48,14 +57,12 @@ class _NonlinearCamSDEFunc:
                     float(value), dtype=torch.float64, device=device
                 )
 
-        self._u_path = torch.zeros(2, 1, dtype=torch.float64, device=device)
-
-    @staticmethod
-    def _inv_softplus(x: float) -> float:
-        x = max(float(x), 1e-8)
-        if x > 30.0:
-            return x
-        return float(np.log(np.expm1(x)))
+        self._init_control_path(
+            dt=sampling_time,
+            input_dim=1,
+            device=device,
+            dtype=torch.float64,
+        )
 
     def parameters(self):
         return list(self._raw_params.values())
@@ -65,11 +72,6 @@ class _NonlinearCamSDEFunc:
 
     def eval(self):
         return self
-
-    def set_control(self, u_path):
-        if u_path.ndim == 1:
-            u_path = u_path.reshape(-1, 1)
-        self._u_path = u_path
 
     def _decode_param(self, name: str):
         import torch.nn.functional as F
@@ -84,15 +86,6 @@ class _NonlinearCamSDEFunc:
     def _decoded_params(self):
         all_names = set(self._raw_params.keys()) | set(self._const_params.keys())
         return {name: self._decode_param(name) for name in all_names}
-
-    def _u_at(self, t, batch_size):
-        import torch
-
-        idx = torch.clamp((t / self.dt).long(), min=0, max=self._u_path.shape[0] - 1)
-        u_t = self._u_path[idx]
-        if u_t.ndim == 1:
-            u_t = u_t.unsqueeze(0)
-        return u_t.expand(batch_size, -1)
 
     @staticmethod
     def _safe_div(num, den, eps: float = 1e-8):
@@ -124,16 +117,24 @@ class _NonlinearCamSDEFunc:
         return y_geom, cos_phi, A, B
 
     def _theta_ddot(self, theta, omega, current, p):
+        import torch
+
         y_geom, cos_phi, A, B = self._geometry_terms(theta, p)
         inertial_coeff = (4.0 * p["I"]) / (p["L"] ** 2 * cos_phi)
         spring_coeff = (2.0 * p["k"]) / (p["L"] * cos_phi)
         m_eff = p["J"] + inertial_coeff * A
+        # Clamp effective mass away from zero to bound the acceleration in
+        # stiff parameter regimes (e.g. very small J).
+        m_eff = torch.clamp(torch.abs(m_eff), min=self._min_m_eff) * torch.sign(
+            m_eff + self._eps
+        )
         rhs = (
             p["k_t"] * current
             - spring_coeff * (y_geom + p["delta"])
             - inertial_coeff * B * (omega**2)
         )
-        return self._safe_div(rhs, m_eff)
+        acc = self._safe_div(rhs, m_eff)
+        return torch.clamp(acc, -self._max_acc, self._max_acc)
 
     def f(self, t, y):
         import torch
@@ -144,14 +145,26 @@ class _NonlinearCamSDEFunc:
         current = y[:, 2]
         u_t = self._u_at(t, y.shape[0])[:, 0]
 
-        acc = self._theta_ddot(theta, omega, current, p)
+        # Soft-clamp omega and current to prevent runaway during stiff
+        # Euler integration.  tanh preserves differentiability everywhere.
+        omega_limit = 500.0
+        current_limit = 50.0
+        omega_c = omega_limit * torch.tanh(omega / omega_limit)
+        current_c = current_limit * torch.tanh(current / current_limit)
+
+        acc = self._theta_ddot(theta, omega_c, current_c, p)
         i_dot = (
-            -(p["R_M"] / p["L_M"]) * current
-            + (p["k_b"] / p["L_M"]) * omega
+            -(p["R_M"] / p["L_M"]) * current_c
+            + (p["k_b"] / p["L_M"]) * omega_c
             + u_t / p["L_M"]
         )
+        # Clamp i_dot to limit the fast electrical dynamics.
+        i_dot_limit = 1e4
+        i_dot = torch.clamp(i_dot, -i_dot_limit, i_dot_limit)
 
-        return torch.stack([omega, acc, i_dot], dim=-1)
+        # Return clamped omega_c as d(theta)/dt so that theta stays
+        # consistent with the bounded velocity.
+        return torch.stack([omega_c, acc, i_dot], dim=-1)
 
     def g(self, t, y):
         import torch
@@ -190,6 +203,7 @@ class HybridNonlinearCam(BaseModel):
         trainable_params: Iterable[str] = ("J", "k", "delta", "k_t", "k_b"),
         learning_rate: float = 2e-2,
         epochs: int = 600,
+        integration_substeps: int = 20,
     ):
         super().__init__(nu=1, ny=2)
         if sampling_time <= 0:
@@ -199,6 +213,7 @@ class HybridNonlinearCam(BaseModel):
         self.learning_rate = float(learning_rate)
         self.epochs = int(epochs)
         self.trainable_params = tuple(trainable_params)
+        self.integration_substeps = int(integration_substeps)
 
         self.params_: Dict[str, float] = {
             "R": float(R),
@@ -225,31 +240,28 @@ class HybridNonlinearCam(BaseModel):
         self._device = None
 
     def _simulate_state_torch(self, u_t, theta0, omega0, current0):
-        try:
-            import torch
-            import torchsde
-        except ImportError:
-            raise ImportError("torchsde required. Install with: pip install torchsde")
+        import torch
 
-        self.sde_func_.set_control(u_t)
-        ts = torch.arange(
-            u_t.shape[0], dtype=torch.float64, device=self._device
-        ) * self.sampling_time
-        x0 = torch.stack([theta0, omega0, current0]).reshape(1, 3)
-        path = torchsde.sdeint(
-            self.sde_func_,
-            x0,
-            ts,
-            method="euler",
+        x0 = torch.stack([theta0, omega0, current0])
+        return simulate_controlled_sde(
+            sde_func=self.sde_func_,
+            u_path=u_t,
+            x0=x0,
             dt=self.sampling_time,
+            method="euler",
+            integration_dt=self.sampling_time / self.integration_substeps,
         )
-        return path[:, 0, :]
 
-    def fit(self, u: np.ndarray, y: np.ndarray) -> "HybridNonlinearCam":
+    def fit(
+        self,
+        u: np.ndarray,
+        y: np.ndarray,
+        wandb_run=None,
+        wandb_log_every: int = 1,
+    ) -> "HybridNonlinearCam":
         """Fit selected parameters by minimizing free-run error with torchsde."""
         try:
             import torch
-            import torch.optim as optim
         except ImportError:
             raise ImportError("PyTorch required. Install with: pip install torch")
 
@@ -279,17 +291,36 @@ class HybridNonlinearCam(BaseModel):
         optim_vars = self.sde_func_.parameters()
         self.training_loss_ = []
         if optim_vars:
-            optimizer = optim.Adam(optim_vars, lr=self.learning_rate)
-            for _ in range(self.epochs):
-                optimizer.zero_grad()
+            def _loss_fn():
                 state_path = self._simulate_state_torch(
                     u_t=u_t, theta0=theta0, omega0=omega0, current0=current0
                 )
                 theta_hat = state_path[:, 0]
-                loss = torch.mean((theta_hat[self.max_lag :] - y_t[self.max_lag :]) ** 2)
-                loss.backward()
-                optimizer.step()
-                self.training_loss_.append(float(loss.detach().cpu().item()))
+                return torch.mean((theta_hat[self.max_lag :] - y_t[self.max_lag :]) ** 2)
+
+            def _log_epoch(epoch: int, loss_value: float, grad_norm: float):
+                if wandb_run is None or wandb_log_every <= 0 or epoch % wandb_log_every:
+                    return
+                payload = {
+                    "train/epoch": epoch,
+                    "train/loss": loss_value,
+                    "train/grad_norm": grad_norm,
+                }
+                payload.update(
+                    {
+                        f"params/{name}": value
+                        for name, value in self.sde_func_.decoded_parameter_dict().items()
+                    }
+                )
+                wandb_run.log(payload, step=epoch)
+
+            self.training_loss_ = optimize_with_adam(
+                parameters=optim_vars,
+                loss_fn=_loss_fn,
+                epochs=self.epochs,
+                learning_rate=self.learning_rate,
+                on_epoch_end=_log_epoch,
+            )
 
         self.params_.update(self.sde_func_.decoded_parameter_dict())
         self._is_fitted = True
@@ -375,5 +406,6 @@ class HybridNonlinearCam(BaseModel):
         trainable = ",".join(self.trainable_params)
         return (
             "HybridNonlinearCam("
-            f"dt={self.sampling_time}, trainable=[{trainable}], epochs={self.epochs})"
+            f"dt={self.sampling_time}, trainable=[{trainable}], "
+            f"epochs={self.epochs}, substeps={self.integration_substeps})"
         )

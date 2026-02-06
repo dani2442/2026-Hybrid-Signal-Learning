@@ -58,6 +58,9 @@ Implementation details:
 - The physical parameters (`J`, `R`, `K`, optional `delta`) are then refined with
   gradient descent (`nn.Parameter`) by minimizing free-run error through
   `torchsde` integration.
+- Training/integration now reuse shared utilities in
+  `src/models/torchsde_utils.py` to avoid duplicated control interpolation and
+  optimizer loop code.
 
 Prediction:
 
@@ -132,6 +135,7 @@ Electrical subsystem:
   MSE with Adam (PyTorch).
 - Positive physical parameters are constrained with softplus.
 - Small epsilon guards avoid divisions near singular geometry points.
+- Training uses the same shared TorchSDE utilities as Model 1.
 
 ## Practical Notes
 
@@ -140,3 +144,5 @@ Electrical subsystem:
   trainable subset (`J`, `k`, `delta`, `k_t`) before adding more parameters.
 - If training diverges, reduce learning rate and/or epochs and inspect
   `training_loss_`.
+- For experiment tracking, pass a `wandb_run` object to `fit(...)`; models log
+  per-epoch `train/loss`, `train/grad_norm`, and decoded parameters.
