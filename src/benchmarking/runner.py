@@ -21,7 +21,9 @@ from ..models import (
     HybridLinearBeam,
     HybridNonlinearCam,
 )
+from ..models.gru import GRU
 from ..models.lstm import LSTM
+from ..models.neural_network import NeuralNetwork
 from ..models.tcn import TCN
 from ..models.ude import UDE
 from ..models.mamba import Mamba
@@ -195,6 +197,33 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
                 n_layers=2,
                 expand_factor=2,
                 dropout=0.1,
+                learning_rate=1e-3,
+                epochs=200,
+                batch_size=32,
+            ),
+        ),
+        "gru": BenchmarkCase(
+            key="gru",
+            name="GRU",
+            factory=lambda dt: GRU(
+                nu=10,
+                ny=10,
+                hidden_size=64,
+                num_layers=2,
+                dropout=0.1,
+                learning_rate=1e-3,
+                epochs=200,
+                batch_size=32,
+            ),
+        ),
+        "neural_network": BenchmarkCase(
+            key="neural_network",
+            name="Neural Network",
+            factory=lambda dt: NeuralNetwork(
+                nu=10,
+                ny=10,
+                hidden_layers=[80, 80, 80],
+                activation="selu",
                 learning_rate=1e-3,
                 epochs=200,
                 batch_size=32,
