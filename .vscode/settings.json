@@ -1,0 +1,10 @@
+
+{
+    "notebook.cellToolbarLocation": {
+        "default": "hidden"
+    },
+    "terminal.integrated.env.linux": {"PYTHONPATH": "${workspaceFolder}"},
+    "python.terminal.executeInFileDir": false,
+    "python.defaultInterpreterPath": "python",
+    "python.terminal.activateEnvironment": true,
+}

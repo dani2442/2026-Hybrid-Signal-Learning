@@ -1,0 +1,18 @@
+[project]
+name = "hybrid-modeling"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.2",
+    "scipy>=1.16.1",
+    "scikit-learn>=1.8.0",
+    "statsmodels>=0.14.6",
+    "torch>=2.10.0",
+    "torchcde>=0.2.5",
+    "tqdm>=4.67.2",
+    "torchsde>=0.2.6",
+    "wandb>=0.24.2",
+]

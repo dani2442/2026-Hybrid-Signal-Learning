@@ -1,0 +1,178 @@
+{
+  "config": {
+    "datasets": [
+      "multisine_05"
+    ],
+    "preprocess": true,
+    "resample_factor": 50,
+    "train_ratio": 0.8,
+    "end_ref_tolerance": 1e-08,
+    "output_json": "benchmark_results.json"
+  },
+  "cases": [
+    "narx",
+    "random_forest",
+    "neural_ode",
+    "neural_sde",
+    "hybrid_linear_beam",
+    "hybrid_nonlinear_cam"
+  ],
+  "results": [
+    {
+      "dataset": "multisine_05",
+      "model": "NARX",
+      "mode": "OSA",
+      "fit_seconds": 0.13842025299891247,
+      "n_predictions": 211,
+      "MSE": 0.00864469364624341,
+      "RMSE": 0.0929768446778197,
+      "MAE": 0.07426394390175364,
+      "R2": 0.9946755391684399,
+      "NRMSE": 0.014231433325872553,
+      "FIT%": 0.9270310968181639
+    },
+    {
+      "dataset": "multisine_05",
+      "model": "NARX",
+      "mode": "FR",
+      "fit_seconds": 0.13842025299891247,
+      "n_predictions": 211,
+      "MSE": 0.7433333509954639,
+      "RMSE": 0.8621678206680321,
+      "MAE": 0.6533940731078923,
+      "R2": 0.5421643063212975,
+      "NRMSE": 0.13196709243110089,
+      "FIT%": 0.3233644306728308
+    },
+    {
+      "dataset": "multisine_05",
+      "model": "RandomForest",
+      "mode": "OSA",
+      "fit_seconds": 1.3875365690000763,
+      "n_predictions": 211,
+      "MSE": 0.019577751790873243,
+      "RMSE": 0.13992051954903986,
+      "MAE": 0.0958345411386396,
+      "R2": 0.987941623284035,
+      "NRMSE": 0.02141683288762583,
+      "FIT%": 0.8901893597324696
+    },
+    {
+      "dataset": "multisine_05",
+      "model": "RandomForest",
+      "mode": "FR",
+      "fit_seconds": 1.3875365690000763,
+      "n_predictions": 211,
+      "MSE": 0.21654006069898088,
+      "RMSE": 0.4653386516280169,
+      "MAE": 0.35449533761548957,
+      "R2": 0.8666281167573346,
+      "NRMSE": 0.07122672335830932,
+      "FIT%": 0.6347988455074856
+    },
+    {
+      "dataset": "multisine_05",
+      "model": "NeuralODE",
+      "mode": "OSA",
+      "fit_seconds": 101.64511416999994,
+      "n_predictions": 220,
+      "MSE": 0.01613412353467288,
+      "RMSE": 0.12702016979469394,
+      "MAE": 0.09087657389993017,
+      "R2": 0.9907296226849125,
+      "NRMSE": 0.01944225020474837,
+      "FIT%": 0.9037172013540972
+    },
+    {
+      "dataset": "multisine_05",
+      "model": "NeuralODE",
+      "mode": "FR",
+      "fit_seconds": 101.64511416999994,
+      "n_predictions": 221,
+      "MSE": 0.6282725977944101,
+      "RMSE": 0.7926364852783463,
+      "MAE": 0.5692247639664195,
+      "R2": 0.6390058607294246,
+      "NRMSE": 0.12132432898729845,
+      "FIT%": 0.39917212175983774
+    },
+    {
+      "dataset": "multisine_05",
+      "model": "NeuralSDE",
+      "mode": "OSA",
+      "fit_seconds": 118.40362954299962,
+      "n_predictions": 220,
+      "MSE": 0.016551788126487804,
+      "RMSE": 0.12865375286593006,
+      "MAE": 0.09939627845940942,
+      "R2": 0.990489640119454,
+      "NRMSE": 0.019692293413260446,
+      "FIT%": 0.9024789259670196
+    },
+    {
+      "dataset": "multisine_05",
+      "model": "NeuralSDE",
+      "mode": "FR",
+      "fit_seconds": 118.40362954299962,
+      "n_predictions": 221,
+      "MSE": 0.5966225214563385,
+      "RMSE": 0.772413439458648,
+      "MAE": 0.549899146732853,
+      "R2": 0.6571914255712147,
+      "NRMSE": 0.11822890313985883,
+      "FIT%": 0.41450143089091573
+    },
+    {
+      "dataset": "multisine_05",
+      "model": "HybridLinearBeam",
+      "mode": "OSA",
+      "fit_seconds": 284.2549934939998,
+      "n_predictions": 219,
+      "MSE": 0.10116045877813748,
+      "RMSE": 0.3180573199568554,
+      "MAE": 0.2469945062785388,
+      "R2": 0.9405618443541722,
+      "NRMSE": 0.04868321309952465,
+      "FIT%": 0.7562005831716823
+    },
+    {
+      "dataset": "multisine_05",
+      "model": "HybridLinearBeam",
+      "mode": "FR",
+      "fit_seconds": 284.2549934939998,
+      "n_predictions": 219,
+      "MSE": 0.12049037348671726,
+      "RMSE": 0.3471172330592609,
+      "MAE": 0.27267786949527606,
+      "R2": 0.9292042991932813,
+      "NRMSE": 0.0531312476311933,
+      "FIT%": 0.7339253848885265
+    },
+    {
+      "dataset": "multisine_05",
+      "model": "HybridNonlinearCam",
+      "mode": "OSA",
+      "fit_seconds": 716.2684388559992,
+      "n_predictions": 219,
+      "MSE": 0.10116045877813748,
+      "RMSE": 0.3180573199568554,
+      "MAE": 0.2469945062785388,
+      "R2": 0.9405618443541722,
+      "NRMSE": 0.04868321309952465,
+      "FIT%": 0.7562005831716823
+    },
+    {
+      "dataset": "multisine_05",
+      "model": "HybridNonlinearCam",
+      "mode": "FR",
+      "fit_seconds": 716.2684388559992,
+      "n_predictions": 219,
+      "MSE": NaN,
+      "RMSE": NaN,
+      "MAE": NaN,
+      "R2": NaN,
+      "NRMSE": NaN,
+      "FIT%": NaN
+    }
+  ]
+}
