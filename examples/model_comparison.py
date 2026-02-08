@@ -345,6 +345,58 @@ def plot_training_time(results: dict, out_dir: str):
     plt.close(fig)
 
 
+def plot_individual_model(results: dict, name: str, entry: dict, out_dir: str):
+    """Save a prediction + residual figure for a single model (OSA & FR)."""
+    import matplotlib.pyplot as plt
+    _configure_mpl()
+
+    t = results["t"]
+    y_true = results["y_true"]
+    safe_name = name.lower().replace(" ", "_")
+    idx = list(results["models"].keys()).index(name)
+    c = _colour(name, idx)
+
+    for mode in ("OSA", "FR"):
+        pred_key = "fr_pred" if mode == "FR" else "osa_pred"
+        metrics_key = "fr_metrics" if mode == "FR" else "osa_metrics"
+        if pred_key not in entry:
+            continue
+
+        y_pred = entry[pred_key]
+        residual = y_true - y_pred
+        m = entry.get(metrics_key, {})
+        r2 = m.get("R2", float("nan"))
+        fit_pct = m.get("FIT%", float("nan"))
+
+        fig, axes = plt.subplots(2, 1, figsize=(14, 7), sharex=True,
+                                 gridspec_kw={"height_ratios": [3, 1]})
+
+        # ── top: prediction ──
+        ax = axes[0]
+        ax.plot(t, y_true, "k-", lw=1.2, alpha=0.7, label="Ground Truth")
+        ax.plot(t, y_pred, color=c, lw=1.0, alpha=0.85, label=f"{name}")
+        mode_label = "Free-Run" if mode == "FR" else "One-Step-Ahead"
+        ax.set_title(f"{name} — {mode_label}  (R²={r2:.4f}, FIT%={fit_pct:.4f})")
+        ax.set_ylabel("Output (y)")
+        ax.legend(loc="upper right", fontsize=9)
+        ax.set_xlim(t[0], t[-1])
+
+        # ── bottom: residual ──
+        ax = axes[1]
+        ax.axhline(0, color="k", lw=0.5, alpha=0.4)
+        ax.plot(t, residual, color=c, lw=0.7, alpha=0.8)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Residual")
+        ax.set_xlim(t[0], t[-1])
+
+        fig.tight_layout()
+        fname = f"{safe_name}_{mode.lower()}.png"
+        path = os.path.join(out_dir, fname)
+        fig.savefig(path)
+        plt.close(fig)
+        print(f"  Saved: {path}")
+
+
 def plot_fr_zoom(results: dict, out_dir: str, t_start: float = 2.0, t_end: float = 5.0):
     """Zoomed-in free-run predictions for a time window."""
     import matplotlib.pyplot as plt
@@ -490,7 +542,10 @@ def main():
     fr_board = print_leaderboard(results, mode="FR")
 
     # ── 3. Figures ──
-    print(f"\nGenerating figures → {out}/")
+    fig_dir = os.path.join(ROOT_DIR, "figures")
+    os.makedirs(fig_dir, exist_ok=True)
+
+    print(f"\nGenerating overlay figures → {out}/")
     for mode in ("OSA", "FR"):
         plot_predictions_overlay(results, mode, out)
         plot_residuals_overlay(results, mode, out)
@@ -498,6 +553,12 @@ def main():
 
     plot_training_time(results, out)
     plot_fr_zoom(results, out, t_start=2.0, t_end=5.0)
+
+    print(f"\nGenerating per-model figures → {fig_dir}/")
+    for name, entry in results["models"].items():
+        if "error" in entry and len(entry) == 1:
+            continue
+        plot_individual_model(results, name, entry, fig_dir)
 
     # ── 4. JSON dump ──
     save_results_json(results, out)
@@ -508,7 +569,5 @@ def main():
     print(f"{'='*60}")
 
 
-if __name__ == "__main__":
-    main()
 if __name__ == "__main__":
     main()

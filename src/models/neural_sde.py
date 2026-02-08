@@ -158,7 +158,14 @@ class NeuralSDE(BaseModel):
         self._dtype = None
         self.training_loss_: list[float] = []
 
-    def _simulate_trajectory(self, u_path, x0):
+    def _simulate_trajectory(self, u_path, x0, deterministic=False):
+        if deterministic:
+            # Use drift-only (ODE) simulation for deterministic eval
+            from .torchsde_utils import _euler_ode_integrate
+            self.sde_func_.set_control(u_path)
+            return _euler_ode_integrate(
+                self.sde_func_, u_path, x0, self.dt, self.dt,
+            )
         return simulate_controlled_sde(
             sde_func=self.sde_func_,
             u_path=u_path,
@@ -167,11 +174,13 @@ class NeuralSDE(BaseModel):
             method=self.solver,
         )
 
-    def _integrate_one_step(self, x_t, u_t):
+    def _integrate_one_step(self, x_t, u_t, deterministic=False):
         import torch
 
         u_path = torch.cat([u_t, u_t], dim=0)
-        x_path = self._simulate_trajectory(u_path=u_path, x0=x_t)
+        x_path = self._simulate_trajectory(
+            u_path=u_path, x0=x_t, deterministic=deterministic,
+        )
         return x_path[-1]
 
     def fit(
@@ -223,7 +232,11 @@ class NeuralSDE(BaseModel):
         return self
 
     def predict_osa(self, u: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """One-step-ahead prediction using measured state at each step."""
+        """One-step-ahead prediction using measured state at each step.
+
+        Uses deterministic (drift-only) integration so predictions are
+        reproducible and not degraded by accumulated stochastic noise.
+        """
         import torch
 
         u = np.asarray(u, dtype=float).reshape(-1, self.input_dim)
@@ -235,7 +248,9 @@ class NeuralSDE(BaseModel):
             for t in range(len(y) - 1):
                 x_t = torch.tensor(y[t], dtype=self._dtype, device=self._device)
                 u_t = torch.tensor(u[t : t + 1], dtype=self._dtype, device=self._device)
-                x_next = self._integrate_one_step(x_t=x_t, u_t=u_t)
+                x_next = self._integrate_one_step(
+                    x_t=x_t, u_t=u_t, deterministic=True,
+                )
                 predictions.append(x_next.cpu().numpy())
 
         return np.asarray(predictions).reshape(-1)
@@ -246,7 +261,11 @@ class NeuralSDE(BaseModel):
         y_initial: np.ndarray,
         show_progress: bool = True,
     ) -> np.ndarray:
-        """Free-run simulation from initial condition."""
+        """Free-run simulation from initial condition.
+
+        Uses deterministic (drift-only) integration so predictions are
+        reproducible and not degraded by accumulated stochastic noise.
+        """
         del show_progress  # retained for API compatibility
         import torch
 
@@ -257,7 +276,9 @@ class NeuralSDE(BaseModel):
         with torch.no_grad():
             u_t = torch.tensor(u, dtype=self._dtype, device=self._device)
             x0 = torch.tensor(y_init[0], dtype=self._dtype, device=self._device)
-            pred = self._simulate_trajectory(u_path=u_t, x0=x0)
+            pred = self._simulate_trajectory(
+                u_path=u_t, x0=x0, deterministic=True,
+            )
         return pred.cpu().numpy().reshape(-1)
 
     def __repr__(self) -> str:
