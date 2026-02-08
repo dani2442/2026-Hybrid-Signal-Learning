@@ -119,6 +119,7 @@ class NeuralCDE(BaseModel):
         epochs: int = 100,
         rtol: float = 1e-4,
         atol: float = 1e-5,
+        sequence_length: int = 50,
     ):
         super().__init__(nu=input_dim, ny=1)
         self.hidden_dim = int(hidden_dim)
@@ -130,6 +131,7 @@ class NeuralCDE(BaseModel):
         self.epochs = int(epochs)
         self.rtol = float(rtol)
         self.atol = float(atol)
+        self.sequence_length = int(sequence_length)
 
         if self.solver not in self._VALID_SOLVERS:
             raise ValueError(
@@ -263,7 +265,6 @@ class NeuralCDE(BaseModel):
         u: np.ndarray,
         y: np.ndarray,
         verbose: bool = True,
-        sequence_length: int = 50,
         wandb_run=None,
         wandb_log_every: int = 1,
     ) -> "NeuralCDE":
@@ -333,7 +334,7 @@ class NeuralCDE(BaseModel):
         criterion = torch.nn.MSELoss()
 
         # --- subsequence indices ---
-        seq_len = min(sequence_length, n_total)
+        seq_len = min(self.sequence_length, n_total)
         n_windows = max(1, n_total - seq_len)
         # Multiple windows per epoch for more stable gradients
         windows_per_epoch = max(1, n_total // seq_len)

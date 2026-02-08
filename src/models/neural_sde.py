@@ -136,6 +136,7 @@ class NeuralSDE(BaseModel):
         dt: float = 0.05,
         learning_rate: float = 1e-3,
         epochs: int = 100,
+        sequence_length: int = 50,
     ):
         super().__init__(nu=input_dim, ny=state_dim)
         self.state_dim = int(state_dim)
@@ -146,6 +147,7 @@ class NeuralSDE(BaseModel):
         self.dt = float(dt)
         self.learning_rate = float(learning_rate)
         self.epochs = int(epochs)
+        self.sequence_length = int(sequence_length)
 
         if self.solver not in self._SUPPORTED_SOLVERS:
             supported = ", ".join(sorted(self._SUPPORTED_SOLVERS))
@@ -177,7 +179,6 @@ class NeuralSDE(BaseModel):
         u: np.ndarray,
         y: np.ndarray,
         verbose: bool = True,
-        sequence_length: int = 20,
         wandb_run=None,
         wandb_log_every: int = 1,
     ) -> "NeuralSDE":
@@ -207,7 +208,7 @@ class NeuralSDE(BaseModel):
             y=y,
             input_dim=self.input_dim,
             state_dim=self.state_dim,
-            sequence_length=sequence_length,
+            sequence_length=self.sequence_length,
             epochs=self.epochs,
             learning_rate=self.learning_rate,
             device=self._device,
