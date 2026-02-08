@@ -16,10 +16,15 @@ from ..models import (
     NARX,
     NeuralODE,
     NeuralSDE,
+    NeuralCDE,
     RandomForest,
     HybridLinearBeam,
     HybridNonlinearCam,
 )
+from ..models.lstm import LSTM
+from ..models.tcn import TCN
+from ..models.ude import UDE
+from ..models.mamba import Mamba
 from ..validation.metrics import Metrics
 
 
@@ -70,11 +75,11 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
             factory=lambda dt: NeuralODE(
                 state_dim=1,
                 input_dim=1,
-                hidden_layers=[32, 32],
+                hidden_layers=[64, 64],
                 dt=dt,
                 solver="rk4",
                 learning_rate=1e-3,
-                epochs=80,
+                epochs=200,
             ),
         ),
         "neural_sde": BenchmarkCase(
@@ -83,12 +88,25 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
             factory=lambda dt: NeuralSDE(
                 state_dim=1,
                 input_dim=1,
-                hidden_layers=[32, 32],
-                diffusion_hidden_layers=[32, 32],
+                hidden_layers=[64, 64],
+                diffusion_hidden_layers=[64, 64],
                 dt=dt,
                 solver="euler",
                 learning_rate=1e-3,
-                epochs=80,
+                epochs=200,
+            ),
+        ),
+        "neural_cde": BenchmarkCase(
+            key="neural_cde",
+            name="NeuralCDE",
+            factory=lambda dt: NeuralCDE(
+                hidden_dim=32,
+                input_dim=2,
+                hidden_layers=[64, 64],
+                interpolation="cubic",
+                solver="rk4",
+                learning_rate=1e-3,
+                epochs=200,
             ),
         ),
         "hybrid_linear_beam": BenchmarkCase(
@@ -123,6 +141,63 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
                 learning_rate=1e-3,
                 epochs=400,
                 integration_substeps=50,
+            ),
+        ),
+        "lstm": BenchmarkCase(
+            key="lstm",
+            name="LSTM",
+            factory=lambda dt: LSTM(
+                nu=10,
+                ny=10,
+                hidden_size=64,
+                num_layers=2,
+                dropout=0.1,
+                learning_rate=1e-3,
+                epochs=200,
+                batch_size=32,
+            ),
+        ),
+        "tcn": BenchmarkCase(
+            key="tcn",
+            name="TCN",
+            factory=lambda dt: TCN(
+                nu=10,
+                ny=10,
+                num_channels=[64, 64, 64, 64],
+                kernel_size=3,
+                dropout=0.1,
+                learning_rate=1e-3,
+                epochs=200,
+                batch_size=32,
+            ),
+        ),
+        "ude": BenchmarkCase(
+            key="ude",
+            name="UDE",
+            factory=lambda dt: UDE(
+                sampling_time=dt,
+                tau=1.0,
+                hidden_layers=[64, 64],
+                learning_rate=1e-3,
+                epochs=200,
+                sequence_length=20,
+            ),
+        ),
+        "mamba": BenchmarkCase(
+            key="mamba",
+            name="Mamba",
+            factory=lambda dt: Mamba(
+                nu=10,
+                ny=10,
+                d_model=64,
+                d_state=16,
+                d_conv=4,
+                n_layers=2,
+                expand_factor=2,
+                dropout=0.1,
+                learning_rate=1e-3,
+                epochs=200,
+                batch_size=32,
             ),
         ),
     }
@@ -164,7 +239,7 @@ class BenchmarkRunner:
         fit_sig = inspect.signature(model.fit)
         kwargs = {}
         if "verbose" in fit_sig.parameters:
-            kwargs["verbose"] = False
+            kwargs["verbose"] = True
         if wandb_run is not None and "wandb_run" in fit_sig.parameters:
             kwargs["wandb_run"] = wandb_run
             if "wandb_log_every" in fit_sig.parameters:
@@ -211,12 +286,18 @@ class BenchmarkRunner:
                     }
                 )
 
-            for case in self.cases:
+            for case_idx, case in enumerate(self.cases, 1):
+                print(
+                    f"\n{'='*60}\n"
+                    f"[{case_idx}/{len(self.cases)}] Training {case.name} ..."
+                    f"\n{'='*60}"
+                )
                 model = case.factory(dt)
                 t0 = time.perf_counter()
                 try:
                     self._fit_model(model, train_ds.u, train_ds.y, wandb_run=wandb_run)
                     fit_seconds = time.perf_counter() - t0
+                    print(f"[{case.name}] Training done in {fit_seconds:.1f}s")
                 except Exception as exc:
                     fit_seconds = time.perf_counter() - t0
                     rows.append(

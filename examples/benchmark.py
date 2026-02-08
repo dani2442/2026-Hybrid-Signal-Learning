@@ -33,7 +33,7 @@ def main():
     )
     parser.add_argument(
         "--models",
-        default="narx,random_forest,neural_ode,neural_sde,hybrid_linear_beam,hybrid_nonlinear_cam",
+        default="narx,random_forest,neural_ode,neural_sde,neural_cde,hybrid_linear_beam,hybrid_nonlinear_cam",
         help="Comma-separated model case keys.",
     )
     parser.add_argument("--resample-factor", type=int, default=50)

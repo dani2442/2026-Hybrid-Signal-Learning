@@ -11,6 +11,7 @@ dependencies = [
     "scikit-learn>=1.8.0",
     "statsmodels>=0.14.6",
     "torch>=2.10.0",
+    "torchcde>=0.2.5",
     "tqdm>=4.67.2",
     "torchsde>=0.2.6",
     "wandb>=0.24.2",
