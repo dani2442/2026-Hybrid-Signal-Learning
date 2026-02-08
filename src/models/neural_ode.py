@@ -168,12 +168,15 @@ class NeuralODE(BaseModel):
         from torchdiffeq import odeint
         import torch
 
-        self.ode_func_.set_control(u_path, t_path)
         n_steps = u_path.shape[0]
+        # Build the integration time grid FIRST
         if t_path is not None:
             ts = t_path
         else:
             ts = torch.arange(n_steps, dtype=u_path.dtype, device=u_path.device) * self.dt
+
+        # Control signal MUST use the same time grid as the ODE solver
+        self.ode_func_.set_control(u_path, ts)
 
         x0_batch = x0 if x0.ndim == 2 else x0.reshape(1, -1)
 
@@ -212,8 +215,13 @@ class NeuralODE(BaseModel):
 
         params = list(self.ode_func_.parameters())
         optimizer = optim.Adam(params, lr=self.learning_rate)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=100, min_lr=1e-6,
+        )
         criterion = nn.MSELoss()
         loss_history = []
+        best_loss = float("inf")
+        best_state = None
 
         epoch_iter = range(self.epochs)
         if verbose:
@@ -238,10 +246,22 @@ class NeuralODE(BaseModel):
 
             lv = float(loss.detach().cpu().item())
             loss_history.append(lv)
+            scheduler.step(lv)
+
+            # Keep best model weights
+            if lv < best_loss:
+                best_loss = lv
+                best_state = {k: v.clone() for k, v in self.ode_func_.net.state_dict().items()}
+
             if verbose and hasattr(epoch_iter, "set_postfix"):
-                epoch_iter.set_postfix(loss=lv)
+                lr_now = optimizer.param_groups[0]["lr"]
+                epoch_iter.set_postfix(loss=lv, lr=f"{lr_now:.1e}")
             if wandb_run and (epoch + 1) % wandb_log_every == 0:
                 wandb_run.log({"train/loss": lv, "train/epoch": epoch + 1})
+
+        # Restore best weights
+        if best_state is not None:
+            self.ode_func_.net.load_state_dict(best_state)
 
         return loss_history
 
