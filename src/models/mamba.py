@@ -15,8 +15,7 @@ Reference:
 
 from __future__ import annotations
 
-from typing import List, Optional
-
+from typing import Callable
 import numpy as np
 from tqdm.auto import tqdm
 
@@ -58,9 +57,23 @@ class Mamba(BaseModel):
         expand_factor: int = 2,
         dropout: float = 0.1,
         learning_rate: float = 1e-3,
+        lr: float | None = None,
         epochs: int = 100,
         batch_size: int = 32,
+        max_lag: int | None = None,
     ):
+        if max_lag is not None:
+            max_lag = int(max_lag)
+            if max_lag < 0:
+                raise ValueError("max_lag must be non-negative")
+            if (nu != 10 or ny != 10) and (nu != max_lag or ny != max_lag):
+                raise ValueError("Use either max_lag or nu/ny, not conflicting values")
+            nu = max_lag
+            ny = max_lag
+
+        if lr is not None:
+            learning_rate = float(lr)
+
         super().__init__(nu=nu, ny=ny)
         self.d_model = d_model
         self.d_state = d_state
@@ -224,7 +237,14 @@ class Mamba(BaseModel):
         return X, Y
 
     # ------------------------------------------------------------------
-    def fit(self, u: np.ndarray, y: np.ndarray, verbose: bool = True) -> "Mamba":
+    def fit(
+        self,
+        u: np.ndarray,
+        y: np.ndarray,
+        verbose: bool = True,
+        eval_callback: Callable | None = None,
+        eval_every: int = 1,
+    ) -> "Mamba":
         """Train the Mamba network."""
         try:
             import torch
@@ -264,6 +284,8 @@ class Mamba(BaseModel):
         if verbose:
             epoch_iter = tqdm(epoch_iter, desc="Training Mamba", unit="epoch")
 
+        eval_every = max(1, int(eval_every))
+
         for epoch in epoch_iter:
             self.model_.train()
             epoch_loss = 0.0
@@ -277,8 +299,11 @@ class Mamba(BaseModel):
                 optimizer.step()
                 epoch_loss += loss.item()
 
+            avg_loss = epoch_loss / len(loader)
             if verbose and hasattr(epoch_iter, "set_postfix"):
-                epoch_iter.set_postfix(loss=epoch_loss / len(loader))
+                epoch_iter.set_postfix(loss=avg_loss)
+            if eval_callback is not None and (epoch + 1) % eval_every == 0:
+                eval_callback(model=self, epoch=epoch + 1, train_loss=float(avg_loss))
 
         self._is_fitted = True
         return self

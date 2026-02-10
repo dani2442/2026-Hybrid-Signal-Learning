@@ -1,9 +1,10 @@
 """Exponential Smoothing models for time series forecasting."""
 
-from typing import Optional, Tuple
+from typing import Optional
 import numpy as np
 
 from .base import BaseModel
+from ._dependency_utils import is_binary_incompatibility_error
 
 
 class ExponentialSmoothing(BaseModel):
@@ -32,7 +33,6 @@ class ExponentialSmoothing(BaseModel):
         self.seasonal_periods = seasonal_periods
         self.model_ = None
         self.fitted_model_ = None
-        self._y_train: Optional[np.ndarray] = None
 
     def fit(self, u: np.ndarray, y: np.ndarray) -> "ExponentialSmoothing":
         """
@@ -44,11 +44,28 @@ class ExponentialSmoothing(BaseModel):
         """
         try:
             from statsmodels.tsa.holtwinters import ExponentialSmoothing as StatsES
-        except ImportError:
-            raise ImportError("statsmodels required. Install with: pip install statsmodels")
+        except ImportError as exc:
+            if is_binary_incompatibility_error(exc):
+                raise RuntimeError(
+                    "Binary incompatibility between NumPy and compiled dependencies "
+                    "(statsmodels/pandas/pyarrow). Reinstall compatible versions, e.g.:\n"
+                    "  python -m pip install --upgrade --force-reinstall "
+                    "\"numpy<2\" pandas pyarrow statsmodels"
+                ) from exc
+            raise ImportError(
+                "statsmodels required. Install with: pip install statsmodels"
+            ) from exc
+        except Exception as exc:
+            if is_binary_incompatibility_error(exc):
+                raise RuntimeError(
+                    "Binary incompatibility between NumPy and compiled dependencies "
+                    "(statsmodels/pandas/pyarrow). Reinstall compatible versions, e.g.:\n"
+                    "  python -m pip install --upgrade --force-reinstall "
+                    "\"numpy<2\" pandas pyarrow statsmodels"
+                ) from exc
+            raise
 
         y = np.asarray(y, dtype=float)
-        self._y_train = y
 
         self.model_ = StatsES(
             y,

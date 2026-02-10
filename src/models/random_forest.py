@@ -1,11 +1,81 @@
 """Random Forest model for time series forecasting."""
 
-from typing import List, Optional
+import contextlib
+import importlib
+import io
+import sys
+from typing import Optional
 import numpy as np
 from tqdm.auto import tqdm
 
 from .base import BaseModel
+from ._dependency_utils import is_binary_incompatibility_error
 from ..utils.regression import create_lagged_features
+
+
+_MISSING = object()
+
+
+def _binary_incompatibility_message() -> str:
+    return (
+        "Binary incompatibility between NumPy and compiled dependencies "
+        "(scikit-learn/pandas/pyarrow). Reinstall compatible versions, e.g.:\n"
+        "  python -m pip install --upgrade --force-reinstall "
+        "\"numpy<2\" pandas pyarrow scikit-learn"
+    )
+
+
+def _restore_module(name: str, previous):
+    if previous is _MISSING:
+        sys.modules.pop(name, None)
+    else:
+        sys.modules[name] = previous
+
+
+def _import_random_forest_regressor():
+    """Import sklearn RandomForestRegressor with a pandas-free fallback."""
+    try:
+        # NumPy may dump ABI traceback to stderr before raising; keep notebook output clean.
+        with contextlib.redirect_stderr(io.StringIO()):
+            from sklearn.ensemble import RandomForestRegressor
+
+        return RandomForestRegressor, None
+    except ImportError as exc:
+        if not is_binary_incompatibility_error(exc):
+            raise ImportError(
+                "scikit-learn required. Install with: pip install scikit-learn"
+            ) from exc
+        root_exc = exc
+    except Exception as exc:
+        if not is_binary_incompatibility_error(exc):
+            raise
+        root_exc = exc
+
+    # Fallback: force sklearn to treat pandas/pyarrow as unavailable so
+    # optional imports do not crash on ABI-mismatched wheels.
+    previous_pandas = sys.modules.get("pandas", _MISSING)
+    previous_pyarrow = sys.modules.get("pyarrow", _MISSING)
+    for modname in list(sys.modules):
+        if modname == "sklearn" or modname.startswith("sklearn."):
+            del sys.modules[modname]
+
+    sys.modules["pandas"] = None
+    sys.modules["pyarrow"] = None
+    try:
+        ensemble = importlib.import_module("sklearn.ensemble")
+        return (
+            ensemble.RandomForestRegressor,
+            "Warning: loaded scikit-learn without pandas/pyarrow due to NumPy ABI mismatch.",
+        )
+    except Exception as exc:
+        if is_binary_incompatibility_error(exc):
+            raise RuntimeError(_binary_incompatibility_message()) from root_exc
+        raise RuntimeError(
+            "Failed to import scikit-learn RandomForestRegressor."
+        ) from exc
+    finally:
+        _restore_module("pandas", previous_pandas)
+        _restore_module("pyarrow", previous_pyarrow)
 
 
 class RandomForest(BaseModel):
@@ -33,7 +103,17 @@ class RandomForest(BaseModel):
         min_samples_split: int = 2,
         min_samples_leaf: int = 1,
         random_state: int = 42,
+        max_lag: int | None = None,
     ):
+        if max_lag is not None:
+            max_lag = int(max_lag)
+            if max_lag < 0:
+                raise ValueError("max_lag must be non-negative")
+            if (nu != 5 or ny != 5) and (nu != max_lag or ny != max_lag):
+                raise ValueError("Use either max_lag or nu/ny, not conflicting values")
+            nu = max_lag
+            ny = max_lag
+
         super().__init__(nu=nu, ny=ny)
         self.n_estimators = n_estimators
         self.max_depth = max_depth
@@ -44,10 +124,9 @@ class RandomForest(BaseModel):
 
     def fit(self, u: np.ndarray, y: np.ndarray, verbose: bool = True) -> "RandomForest":
         """Train the Random Forest model."""
-        try:
-            from sklearn.ensemble import RandomForestRegressor
-        except ImportError:
-            raise ImportError("scikit-learn required. Install with: pip install scikit-learn")
+        RandomForestRegressor, import_warning = _import_random_forest_regressor()
+        if verbose and import_warning:
+            print(import_warning)
 
         # Prepare data with lagged features
         features, target = create_lagged_features(y, u, self.ny, self.nu)

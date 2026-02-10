@@ -128,24 +128,3 @@ def _align_arrays(
     y_pred = np.asarray(y_pred).flatten()
     n = min(len(y_true), len(y_pred))
     return y_true[:n], y_pred[:n]
-
-
-def compare_models(
-    y_true: np.ndarray,
-    predictions: Dict[str, np.ndarray],
-) -> Dict[str, Dict[str, float]]:
-    """
-    Compare multiple models.
-    
-    Args:
-        y_true: Actual output
-        predictions: Dict of {model_name: predicted_output}
-        
-    Returns:
-        Dict of {model_name: {metric_name: value}}
-    """
-    results = {}
-    for name, y_pred in predictions.items():
-        results[name] = Metrics.compute_all(y_true, y_pred)
-        Metrics.summary(y_true, y_pred, name)
-    return results

@@ -135,17 +135,22 @@ class HybridLinearBeam(BaseModel):
         estimate_delta: bool = True,
         ridge: float = 1e-8,
         learning_rate: float = 1e-2,
+        lr: float | None = None,
         epochs: int = 600,
+        integration_substeps: int = 1,
     ):
         super().__init__(nu=1, ny=2)
         if sampling_time <= 0:
             raise ValueError("sampling_time must be positive")
+        if lr is not None:
+            learning_rate = float(lr)
         self.sampling_time = float(sampling_time)
         self.tau = float(tau)
         self.estimate_delta = bool(estimate_delta)
         self.ridge = float(ridge)
         self.learning_rate = float(learning_rate)
         self.epochs = int(epochs)
+        self.integration_substeps = int(integration_substeps)
 
         self.a1_: float = 0.0
         self.a0_: float = 0.0
@@ -196,12 +201,18 @@ class HybridLinearBeam(BaseModel):
         import torch
 
         x0 = torch.stack([theta0, omega0])
+        int_dt = (
+            self.sampling_time / self.integration_substeps
+            if self.integration_substeps > 1
+            else None
+        )
         state_path = simulate_controlled_sde(
             sde_func=self.sde_func_,
             u_path=u_t,
             x0=x0,
             dt=self.sampling_time,
             method="euler",
+            integration_dt=int_dt,
         )
         return state_path[:, 0]
 
@@ -209,6 +220,7 @@ class HybridLinearBeam(BaseModel):
         self,
         u: np.ndarray,
         y: np.ndarray,
+        verbose: bool = True,
         wandb_run=None,
         wandb_log_every: int = 1,
     ) -> "HybridLinearBeam":
@@ -266,6 +278,8 @@ class HybridLinearBeam(BaseModel):
             epochs=self.epochs,
             learning_rate=self.learning_rate,
             on_epoch_end=_log_epoch,
+            verbose=verbose,
+            progress_desc="Training HybridLinearBeam",
         )
 
         decoded = self.sde_func_.decoded_parameter_dict()

@@ -202,6 +202,7 @@ class HybridNonlinearCam(BaseModel):
         L_M: float,
         trainable_params: Iterable[str] = ("J", "k", "delta", "k_t", "k_b"),
         learning_rate: float = 2e-2,
+        lr: float | None = None,
         epochs: int = 600,
         integration_substeps: int = 20,
     ):
@@ -209,6 +210,8 @@ class HybridNonlinearCam(BaseModel):
         if sampling_time <= 0:
             raise ValueError("sampling_time must be positive")
 
+        if lr is not None:
+            learning_rate = float(lr)
         self.sampling_time = float(sampling_time)
         self.learning_rate = float(learning_rate)
         self.epochs = int(epochs)
@@ -256,6 +259,7 @@ class HybridNonlinearCam(BaseModel):
         self,
         u: np.ndarray,
         y: np.ndarray,
+        verbose: bool = True,
         wandb_run=None,
         wandb_log_every: int = 1,
     ) -> "HybridNonlinearCam":
@@ -321,6 +325,8 @@ class HybridNonlinearCam(BaseModel):
                 learning_rate=self.learning_rate,
                 on_epoch_end=_log_epoch,
                 max_grad_norm=0.5,
+                verbose=verbose,
+                progress_desc="Training HybridNonlinearCam",
             )
 
         self.params_.update(self.sde_func_.decoded_parameter_dict())

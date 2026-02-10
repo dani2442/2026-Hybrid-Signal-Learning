@@ -10,7 +10,6 @@ if ROOT_DIR not in sys.path:
 
 from src import Dataset, NeuralCDE
 from src.validation.metrics import Metrics
-from src.visualization.plots import plot_predictions
 import matplotlib.pyplot as plt
 
 
@@ -38,7 +37,6 @@ def main():
 
     # Initialize Neural CDE model
     print("\n3. Initializing Neural CDE model...")
-    dt = 1.0 / dataset.sampling_rate
     model = NeuralCDE(
         hidden_dim=32,
         input_dim=2,
@@ -65,7 +63,7 @@ def main():
         y_true=test_data.y[1:],  # Skip first point (no prediction)
         y_pred=y_pred_osa,
     )
-    print(f"      OSA Metrics:")
+    print("      OSA Metrics:")
     for key, val in metrics_osa.items():
         print(f"        {key:8s}: {val:.6f}")
 
@@ -77,7 +75,7 @@ def main():
         y_true=test_data.y,
         y_pred=y_pred_fr,
     )
-    print(f"      FR Metrics:")
+    print("      FR Metrics:")
     for key, val in metrics_fr.items():
         print(f"        {key:8s}: {val:.6f}")
 
@@ -95,7 +93,11 @@ def main():
     axes[0].set_xlabel("Time [s]")
     axes[0].set_ylabel("Output")
     axes[0].set_title(f"One-Step-Ahead Prediction (R²={osa_r2:.4f})")
-    axes[0].legend()
+    axes[0].legend(
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.0,
+    )
     axes[0].grid(True, alpha=0.3)
 
     # Free-run simulation
@@ -104,10 +106,14 @@ def main():
     axes[1].set_xlabel("Time [s]")
     axes[1].set_ylabel("Output")
     axes[1].set_title(f"Free-Run Simulation (R²={fr_r2:.4f})")
-    axes[1].legend()
+    axes[1].legend(
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.0,
+    )
     axes[1].grid(True, alpha=0.3)
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 0.82, 1])
     plt.savefig("neural_cde_demo.png", dpi=150, bbox_inches="tight")
     print("   Saved plot to: neural_cde_demo.png")
 

@@ -1,7 +1,7 @@
 """Abstract base class for system identification models."""
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from typing import Optional
 import numpy as np
 
 

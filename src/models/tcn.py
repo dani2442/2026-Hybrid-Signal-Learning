@@ -1,6 +1,6 @@
 """TCN (Temporal Convolutional Network) model for time series forecasting."""
 
-from typing import List, Optional
+from typing import Callable, List, Optional
 import numpy as np
 from tqdm.auto import tqdm
 
@@ -34,9 +34,23 @@ class TCN(BaseModel):
         kernel_size: int = 3,
         dropout: float = 0.1,
         learning_rate: float = 1e-3,
+        lr: float | None = None,
         epochs: int = 100,
         batch_size: int = 32,
+        max_lag: int | None = None,
     ):
+        if max_lag is not None:
+            max_lag = int(max_lag)
+            if max_lag < 0:
+                raise ValueError("max_lag must be non-negative")
+            if (nu != 10 or ny != 10) and (nu != max_lag or ny != max_lag):
+                raise ValueError("Use either max_lag or nu/ny, not conflicting values")
+            nu = max_lag
+            ny = max_lag
+
+        if lr is not None:
+            learning_rate = float(lr)
+
         super().__init__(nu=nu, ny=ny)
         self.num_channels = num_channels or [64, 64, 64, 64]
         self.kernel_size = kernel_size
@@ -54,7 +68,6 @@ class TCN(BaseModel):
 
     def _build_model(self, input_channels: int):
         """Build PyTorch TCN model with causal dilated convolutions."""
-        import torch
         import torch.nn as nn
 
         class CausalConv1d(nn.Module):
@@ -127,7 +140,14 @@ class TCN(BaseModel):
 
         return X, Y
 
-    def fit(self, u: np.ndarray, y: np.ndarray, verbose: bool = True) -> "TCN":
+    def fit(
+        self,
+        u: np.ndarray,
+        y: np.ndarray,
+        verbose: bool = True,
+        eval_callback: Callable | None = None,
+        eval_every: int = 1,
+    ) -> "TCN":
         """Train the TCN network."""
         try:
             import torch
@@ -174,6 +194,8 @@ class TCN(BaseModel):
         if verbose:
             epoch_iter = tqdm(epoch_iter, desc="Training TCN", unit="epoch")
 
+        eval_every = max(1, int(eval_every))
+
         for epoch in epoch_iter:
             self.model_.train()
             epoch_loss = 0.0
@@ -187,8 +209,11 @@ class TCN(BaseModel):
                 optimizer.step()
                 epoch_loss += loss.item()
 
+            avg_loss = epoch_loss / len(loader)
             if verbose and hasattr(epoch_iter, "set_postfix"):
-                epoch_iter.set_postfix(loss=epoch_loss / len(loader))
+                epoch_iter.set_postfix(loss=avg_loss)
+            if eval_callback is not None and (epoch + 1) % eval_every == 0:
+                eval_callback(model=self, epoch=epoch + 1, train_loss=float(avg_loss))
 
         self._is_fitted = True
         return self

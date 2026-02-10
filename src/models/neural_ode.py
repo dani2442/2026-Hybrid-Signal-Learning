@@ -7,7 +7,7 @@ and full-trajectory training.
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Sequence
 
 import numpy as np
 
@@ -25,7 +25,6 @@ class _ODEFunc:
         hidden_layers: List[int],
         activation: str = "selu",
     ):
-        import torch
         import torch.nn as nn
 
         self.state_dim = int(state_dim)
@@ -137,8 +136,10 @@ class NeuralODE(BaseModel):
         solver: str = "rk4",
         dt: float = 0.05,
         learning_rate: float = 1e-3,
+        lr: float | None = None,
         epochs: int = 100,
         sequence_length: int = 50,
+        sequences_per_epoch: int = 24,
         activation: str = "selu",
         training_mode: str = "subsequence",
     ):
@@ -148,9 +149,12 @@ class NeuralODE(BaseModel):
         self.hidden_layers = list(hidden_layers)
         self.solver = solver
         self.dt = float(dt)
+        if lr is not None:
+            learning_rate = float(lr)
         self.learning_rate = float(learning_rate)
         self.epochs = int(epochs)
         self.sequence_length = int(sequence_length)
+        self.sequences_per_epoch = int(sequences_per_epoch)
         self.activation = activation
         self.training_mode = training_mode  # "subsequence" or "full"
 
@@ -216,7 +220,7 @@ class NeuralODE(BaseModel):
         params = list(self.ode_func_.parameters())
         optimizer = optim.Adam(params, lr=self.learning_rate)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=100, min_lr=1e-6,
+            optimizer, mode="min", factor=0.5, patience=200, min_lr=1e-6,
         )
         criterion = nn.MSELoss()
         loss_history = []
@@ -267,8 +271,8 @@ class NeuralODE(BaseModel):
 
     def fit(
         self,
-        u: np.ndarray,
-        y: np.ndarray,
+        u: np.ndarray | Sequence[np.ndarray],
+        y: np.ndarray | Sequence[np.ndarray],
         verbose: bool = True,
         wandb_run=None,
         wandb_log_every: int = 1,
@@ -279,8 +283,27 @@ class NeuralODE(BaseModel):
         except ImportError:
             raise ImportError("PyTorch required. Install with: pip install torch")
 
-        u = np.asarray(u, dtype=float).reshape(-1, self.input_dim)
-        y = np.asarray(y, dtype=float).reshape(-1, self.state_dim)
+        is_multi = isinstance(u, Sequence) and not isinstance(u, np.ndarray)
+        if is_multi != (isinstance(y, Sequence) and not isinstance(y, np.ndarray)):
+            raise ValueError("u and y must both be arrays or both be dataset lists")
+
+        if is_multi:
+            if len(u) != len(y):
+                raise ValueError("u and y dataset lists must have the same length")
+            u_data = [
+                np.asarray(u_ds, dtype=float).reshape(-1, self.input_dim) for u_ds in u
+            ]
+            y_data = [
+                np.asarray(y_ds, dtype=float).reshape(-1, self.state_dim) for y_ds in y
+            ]
+            for u_ds, y_ds in zip(u_data, y_data):
+                if len(u_ds) != len(y_ds):
+                    raise ValueError("Each dataset pair must have u and y with equal length")
+        else:
+            u_data = np.asarray(u, dtype=float).reshape(-1, self.input_dim)
+            y_data = np.asarray(y, dtype=float).reshape(-1, self.state_dim)
+            if len(u_data) != len(y_data):
+                raise ValueError("u and y must have the same length")
 
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._dtype = torch.float32
@@ -292,16 +315,21 @@ class NeuralODE(BaseModel):
         ).to(self._device)
 
         if self.training_mode == "full":
+            if is_multi:
+                raise ValueError(
+                    "training_mode='full' does not support multi-dataset input. "
+                    "Use training_mode='subsequence' for random-batch multi-dataset training."
+                )
             self.training_loss_ = self._train_full_trajectory(
-                u, y, verbose, wandb_run, wandb_log_every,
+                u_data, y_data, verbose, wandb_run, wandb_log_every,
             )
         else:
             # Subsequence batching (original strategy)
             self.training_loss_ = train_sequence_batches(
                 sde_func=self.ode_func_,
                 simulate_fn=lambda u_seq, x0: self._simulate_trajectory(u_seq, x0),
-                u=u,
-                y=y,
+                u=u_data,
+                y=y_data,
                 input_dim=self.input_dim,
                 state_dim=self.state_dim,
                 sequence_length=self.sequence_length,
@@ -313,6 +341,7 @@ class NeuralODE(BaseModel):
                 progress_desc="Training NeuralODE",
                 wandb_run=wandb_run,
                 wandb_log_every=wandb_log_every,
+                sequences_per_epoch=self.sequences_per_epoch,
             )
 
         self._is_fitted = True

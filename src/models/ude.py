@@ -1,22 +1,22 @@
 """Universal Differential Equation (UDE) model.
 
 Combines a known physics prior (linear beam dynamics) with a small neural
-network that learns the unmodelled residual:
+residual acting only on acceleration:
 
-    dx/dt = f_physics(x, u) + f_nn(x, u)
+    dθ/dt = ω
+    dω/dt = (τV - Rω - K(θ + δ))/J + r_nn(ω)
 
 The physics part uses the same second-order beam ODE as HybridLinearBeam:
 
     J θ̈ + R θ̇ + K (θ + δ) = τ V
 
-but the neural correction f_nn captures any model mismatch (nonlinearities,
-unmodelled friction, etc.) and is trained end-to-end through the ODE
-integrator via back-propagation.
+and the neural correction r_nn captures unmodelled effects (e.g. nonlinear
+friction) while keeping kinematics explicit in dθ/dt = ω.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 import numpy as np
 
@@ -24,13 +24,12 @@ from .base import BaseModel
 from .torchsde_utils import (
     ControlledPathMixin,
     inverse_softplus,
-    simulate_controlled_sde,
     train_sequence_batches,
 )
 
 
 class _UDEFunc(ControlledPathMixin):
-    """SDE function for the UDE: physics drift + neural residual, zero diffusion."""
+    """SDE function for the UDE: physics drift + residual on dω/dt, zero diffusion."""
 
     noise_type = "diagonal"
     sde_type = "ito"
@@ -46,7 +45,6 @@ class _UDEFunc(ControlledPathMixin):
     ):
         import torch
         import torch.nn as nn
-        import torch.nn.functional as F
 
         self._device = device
         self._dtype = dtype
@@ -76,16 +74,16 @@ class _UDEFunc(ControlledPathMixin):
             torch.tensor(float(init_params["delta"]), dtype=dtype, device=device)
         )
 
-        # ---------- Neural residual  f_nn([theta, omega, V]) → [d_theta, d_omega]
-        input_size = 3  # theta, omega, voltage
-        state_dim = 2   # corrections to [d_theta, d_omega]
+        # ---------- Neural residual r_nn(omega) → correction to d_omega
+        input_size = 1  # omega only
+        residual_dim = 1
         layers: list[nn.Module] = []
         prev = input_size
         for h in hidden_layers:
             layers.append(nn.Linear(prev, h))
             layers.append(nn.Tanh())
             prev = h
-        layers.append(nn.Linear(prev, state_dim))
+        layers.append(nn.Linear(prev, residual_dim))
         self.residual_net = nn.Sequential(*layers).to(dtype).to(device)
 
         # Small initial scale so physics dominates at the start
@@ -129,7 +127,7 @@ class _UDEFunc(ControlledPathMixin):
 
     # ----- SDE interface -----------------------------------------------------
     def f(self, t, y):
-        """Drift = physics + neural residual."""
+        """Drift with explicit kinematics and neural residual only in acceleration."""
         import torch
 
         J, R, K, delta = self._decoded_physics()
@@ -137,15 +135,11 @@ class _UDEFunc(ControlledPathMixin):
         omega = y[:, 1]
         voltage = self._u_at(t, y.shape[0])[:, 0]
 
-        # Physics: [d_theta = omega,  d_omega = (tau*V - R*omega - K*(theta+delta))/J]
+        # Physics: [d_theta = omega, d_omega = (tau*V - R*omega - K*(theta+delta))/J]
         acc_phys = (self.tau * voltage - R * omega - K * (theta + delta)) / J
-        f_phys = torch.stack([omega, acc_phys], dim=-1)
-
-        # Neural residual
-        nn_input = torch.stack([theta, omega, voltage], dim=-1)
-        f_nn = self.residual_net(nn_input)
-
-        return f_phys + f_nn
+        # Neural residual correction to acceleration only: r_nn(omega)
+        acc_res = self.residual_net(omega.unsqueeze(-1)).squeeze(-1)
+        return torch.stack([omega, acc_phys + acc_res], dim=-1)
 
     def g(self, t, y):
         import torch
@@ -166,12 +160,12 @@ class UDE(BaseModel):
     """
     Universal Differential Equation for system identification.
 
-    Combines a known second-order physics prior with a neural network
-    residual, both trained jointly through an ODE integrator.
+    Combines a known second-order physics prior with a neural residual on
+    acceleration, both trained jointly through an ODE integrator.
 
     Dynamics (state = [θ, ω]):
         dθ/dt = ω
-        dω/dt = (τV − Rω − K(θ+δ)) / J   +  f_nn(θ, ω, V)
+        dω/dt = (τV − Rω − K(θ+δ)) / J   +  f_nn(ω)
 
     Args:
         sampling_time: dt of the discretised data (seconds).
@@ -181,6 +175,9 @@ class UDE(BaseModel):
         epochs: Training epochs (each sweeps ≤100 random subsequences).
         sequence_length: Subsequence length for BPTT.
         ridge: Tikhonov regularisation for the initial LS guess.
+        integration_substeps: RK4 sub-steps per sample interval.
+        training_mode: "full" (single dataset) or "subsequence" (single/multi).
+        omega_loss_weight: Relative weight for velocity error in training loss.
     """
 
     def __init__(
@@ -189,9 +186,16 @@ class UDE(BaseModel):
         tau: float = 1.0,
         hidden_layers: List[int] | None = None,
         learning_rate: float = 1e-3,
+        lr: float | None = None,
         epochs: int = 200,
         sequence_length: int = 20,
+        sequences_per_epoch: int = 24,
+        patience: int | None = 200,
+        min_delta: float = 0.0,
         ridge: float = 1e-8,
+        integration_substeps: int = 1,
+        training_mode: str = "full",
+        omega_loss_weight: float = 0.2,
     ):
         super().__init__(nu=1, ny=2)
         if sampling_time <= 0:
@@ -199,15 +203,37 @@ class UDE(BaseModel):
         self.sampling_time = float(sampling_time)
         self.tau = float(tau)
         self.hidden_layers = hidden_layers or [64, 64]
+        if lr is not None:
+            learning_rate = float(lr)
         self.learning_rate = float(learning_rate)
         self.epochs = int(epochs)
         self.sequence_length = int(sequence_length)
+        self.sequences_per_epoch = int(sequences_per_epoch)
+        self.patience = None if patience is None else int(patience)
+        self.min_delta = float(min_delta)
         self.ridge = float(ridge)
+        self.integration_substeps = int(integration_substeps)
+        if self.integration_substeps <= 0:
+            raise ValueError("integration_substeps must be >= 1")
+        if training_mode not in {"full", "subsequence"}:
+            raise ValueError("training_mode must be 'full' or 'subsequence'")
+        self.training_mode = training_mode
+        self.omega_loss_weight = float(omega_loss_weight)
+        if self.omega_loss_weight < 0:
+            raise ValueError("omega_loss_weight must be non-negative")
 
         self.sde_func_: _UDEFunc | None = None
         self._device = None
         self._dtype = None
         self.training_loss_: list[float] = []
+
+    @staticmethod
+    def _tensor_to_numpy_safe(x) -> np.ndarray:
+        x_cpu = x.detach().cpu()
+        try:
+            return x_cpu.numpy()
+        except RuntimeError:
+            return np.asarray(x_cpu.tolist())
 
     # ----- physics-based initial guess (same as HybridLinearBeam) -----------
     def _initial_guess(self, u: np.ndarray, y: np.ndarray) -> Dict[str, float]:
@@ -229,19 +255,115 @@ class UDE(BaseModel):
 
     # ----- simulation helper ------------------------------------------------
     def _simulate_trajectory(self, u_path, x0):
-        return simulate_controlled_sde(
-            sde_func=self.sde_func_,
-            u_path=u_path,
-            x0=x0,
-            dt=self.sampling_time,
-            method="euler",
+        """Integrate the UDE forward using torchdiffeq (RK4).
+
+        Much faster than the Python-level Euler loop because torchdiffeq
+        builds the computation graph in C++ and RK4 is stable at dt ≈ 0.05
+        without manual sub-stepping.
+        """
+        import torch
+        from torchdiffeq import odeint
+
+        self.sde_func_.set_control(u_path)
+        N = u_path.shape[0]
+        ts = (
+            torch.arange(N, device=self._device, dtype=self._dtype)
+            * self.sampling_time
         )
+        x0_batch = x0.reshape(1, -1)  # (1, state_dim)
+        step_size = self.sampling_time / float(self.integration_substeps)
+        path = odeint(
+            self.sde_func_.f,
+            x0_batch,
+            ts,
+            method="rk4",
+            options={"step_size": step_size},
+        )
+        return path[:, 0, :]  # (N, state_dim)
+
+    # ----- full-trajectory training -----------------------------------------
+    def _train_full_trajectory(
+        self, u, y, verbose, wandb_run=None, wandb_log_every=1,
+    ) -> list:
+        """Train by integrating the full trajectory; weighted loss on θ and ω."""
+        import torch
+        import torch.optim as optim
+        from tqdm.auto import tqdm
+
+        dt = self.sampling_time
+        u_t = torch.tensor(u.reshape(-1, 1), dtype=self._dtype, device=self._device)
+        y_t = torch.tensor(y, dtype=self._dtype, device=self._device)  # (N,)
+        omega_t = torch.tensor(np.gradient(y, dt), dtype=self._dtype, device=self._device)
+
+        theta0 = y_t[0]
+        omega0 = (y_t[1] - y_t[0]) / dt
+        x0 = torch.tensor([theta0, omega0], dtype=self._dtype, device=self._device)
+
+        params = list(self.sde_func_.parameters())
+        optimizer = optim.Adam(params, lr=self.learning_rate)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=200, min_lr=1e-6,
+        )
+        loss_history: list[float] = []
+        best_loss = float("inf")
+        best_state: dict | None = None
+
+        epoch_iter = range(self.epochs)
+        if verbose:
+            epoch_iter = tqdm(epoch_iter, desc="Training UDE (full)", unit="epoch")
+
+        for epoch in epoch_iter:
+            self.sde_func_.train()
+            optimizer.zero_grad()
+
+            pred = self._simulate_trajectory(u_t, x0)  # (N, 2)
+            loss_theta = torch.mean((pred[:, 0] - y_t) ** 2)
+            loss_omega = torch.mean((pred[:, 1] - omega_t) ** 2)
+            loss = loss_theta + (self.omega_loss_weight * loss_omega)
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                loss_history.append(float(loss.detach().cpu().item()))
+                if verbose and hasattr(epoch_iter, "set_postfix"):
+                    epoch_iter.set_postfix(loss=float("nan"))
+                continue
+
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(params, 1.0)
+            optimizer.step()
+
+            lv = float(loss.detach().cpu().item())
+            loss_history.append(lv)
+            scheduler.step(lv)
+
+            if lv < best_loss:
+                best_loss = lv
+                best_state = {id(p): p.data.clone() for p in params}
+
+            if verbose and hasattr(epoch_iter, "set_postfix"):
+                lr_now = optimizer.param_groups[0]["lr"]
+                epoch_iter.set_postfix(loss=lv, lr=f"{lr_now:.1e}")
+            if wandb_run and (epoch + 1) % wandb_log_every == 0:
+                wandb_run.log(
+                    {
+                        "train/loss": lv,
+                        "train/loss_theta": float(loss_theta.detach().cpu().item()),
+                        "train/loss_omega": float(loss_omega.detach().cpu().item()),
+                        "train/epoch": epoch + 1,
+                    }
+                )
+
+        # Restore best weights
+        if best_state is not None:
+            for p in params:
+                p.data.copy_(best_state[id(p)])
+
+        return loss_history
 
     # ----- fit ---------------------------------------------------------------
     def fit(
         self,
-        u: np.ndarray,
-        y: np.ndarray,
+        u: np.ndarray | Sequence[np.ndarray],
+        y: np.ndarray | Sequence[np.ndarray],
         verbose: bool = True,
         wandb_run=None,
         wandb_log_every: int = 1,
@@ -252,15 +374,37 @@ class UDE(BaseModel):
         except ImportError:
             raise ImportError("PyTorch required. Install with: pip install torch")
 
-        u = np.asarray(u, dtype=float).flatten()
-        y = np.asarray(y, dtype=float).flatten()
-        if len(u) != len(y):
-            raise ValueError("u and y must have same length")
+        is_multi = isinstance(u, Sequence) and not isinstance(u, np.ndarray)
+        if is_multi != (isinstance(y, Sequence) and not isinstance(y, np.ndarray)):
+            raise ValueError("u and y must both be arrays or both be dataset lists")
+
+        if is_multi:
+            if len(u) != len(y):
+                raise ValueError("u and y dataset lists must have the same length")
+            u_data = [np.asarray(u_ds, dtype=float).flatten() for u_ds in u]
+            y_data = [np.asarray(y_ds, dtype=float).flatten() for y_ds in y]
+            for u_ds, y_ds in zip(u_data, y_data):
+                if len(u_ds) != len(y_ds):
+                    raise ValueError("Each dataset pair must have u and y with equal length")
+            if self.training_mode == "full":
+                raise ValueError(
+                    "training_mode='full' does not support multi-dataset input. "
+                    "Use training_mode='subsequence' for random-batch multi-dataset training."
+                )
+            init_u = u_data[0]
+            init_y = y_data[0]
+        else:
+            u_data = np.asarray(u, dtype=float).flatten()
+            y_data = np.asarray(y, dtype=float).flatten()
+            if len(u_data) != len(y_data):
+                raise ValueError("u and y must have same length")
+            init_u = u_data
+            init_y = y_data
 
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._dtype = torch.float64
+        self._dtype = torch.float32
 
-        init_params = self._initial_guess(u, y)
+        init_params = self._initial_guess(init_u, init_y)
 
         self.sde_func_ = _UDEFunc(
             sampling_time=self.sampling_time,
@@ -271,30 +415,46 @@ class UDE(BaseModel):
             dtype=self._dtype,
         )
 
-        # For train_sequence_batches the state is 2-D [theta, omega].
-        # We approximate omega from finite differences.
-        dt = self.sampling_time
-        omega = np.gradient(y, dt)
-        y_state = np.column_stack([y, omega])  # (N, 2)
-        u_2d = u.reshape(-1, 1)
+        if self.training_mode == "full":
+            self.training_loss_ = self._train_full_trajectory(
+                u_data, y_data, verbose, wandb_run, wandb_log_every,
+            )
+        else:
+            # Subsequence batching (original strategy)
+            dt = self.sampling_time
+            if is_multi:
+                y_state = []
+                u_2d = []
+                for u_ds, y_ds in zip(u_data, y_data):
+                    omega_ds = np.gradient(y_ds, dt)
+                    y_state.append(np.column_stack([y_ds, omega_ds]))
+                    u_2d.append(u_ds.reshape(-1, 1))
+            else:
+                omega = np.gradient(y_data, dt)
+                y_state = np.column_stack([y_data, omega])  # (N, 2)
+                u_2d = u_data.reshape(-1, 1)
 
-        self.training_loss_ = train_sequence_batches(
-            sde_func=self.sde_func_,
-            simulate_fn=lambda u_seq, x0: self._simulate_trajectory(u_seq, x0),
-            u=u_2d,
-            y=y_state,
-            input_dim=1,
-            state_dim=2,
-            sequence_length=self.sequence_length,
-            epochs=self.epochs,
-            learning_rate=self.learning_rate,
-            device=self._device,
-            dtype=self._dtype,
-            verbose=verbose,
-            progress_desc="Training UDE",
-            wandb_run=wandb_run,
-            wandb_log_every=wandb_log_every,
-        )
+            self.training_loss_ = train_sequence_batches(
+                sde_func=self.sde_func_,
+                simulate_fn=lambda u_seq, x0: self._simulate_trajectory(u_seq, x0),
+                u=u_2d,
+                y=y_state,
+                input_dim=1,
+                state_dim=2,
+                sequence_length=self.sequence_length,
+                epochs=self.epochs,
+                learning_rate=self.learning_rate,
+                device=self._device,
+                dtype=self._dtype,
+                verbose=verbose,
+                progress_desc="Training UDE",
+                wandb_run=wandb_run,
+                wandb_log_every=wandb_log_every,
+                sequences_per_epoch=self.sequences_per_epoch,
+                early_stopping_patience=self.patience,
+                early_stopping_min_delta=self.min_delta,
+                state_loss_weights=[1.0, self.omega_loss_weight],
+            )
 
         self._is_fitted = True
         return self
@@ -350,7 +510,7 @@ class UDE(BaseModel):
             )
             pred = self._simulate_trajectory(u_t, x0)
 
-        y_hat = pred[:, 0].cpu().numpy()
+        y_hat = self._tensor_to_numpy_safe(pred[:, 0])
         return y_hat[self.max_lag :]
 
     def parameters(self) -> Dict[str, float]:

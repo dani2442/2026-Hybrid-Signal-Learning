@@ -18,9 +18,10 @@ from ..models import (
     NeuralSDE,
     NeuralCDE,
     RandomForest,
-    HybridLinearBeam,
-    HybridNonlinearCam,
+    LinearPhysics,
+    StribeckPhysics,
 )
+from ..models.blackbox_ode import VanillaNODE2D, StructuredNODE, AdaptiveNODE
 from ..models.gru import GRU
 from ..models.lstm import LSTM
 from ..models.neural_network import NeuralNetwork
@@ -116,38 +117,24 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
                 sequence_length=50,
             ),
         ),
-        "hybrid_linear_beam": BenchmarkCase(
-            key="hybrid_linear_beam",
-            name="HybridLinearBeam",
-            factory=lambda dt: HybridLinearBeam(
-                sampling_time=dt,
-                tau=1.0,
-                estimate_delta=True,
+        "linear_physics": BenchmarkCase(
+            key="linear_physics",
+            name="LinearPhysics",
+            factory=lambda dt: LinearPhysics(
+                dt=dt,
+                solver="rk4",
                 learning_rate=1e-3,
-                epochs=1500,
+                epochs=1000,
             ),
         ),
-        "hybrid_nonlinear_cam": BenchmarkCase(
-            key="hybrid_nonlinear_cam",
-            name="HybridNonlinearCam",
-            factory=lambda dt: HybridNonlinearCam(
-                sampling_time=dt,
-                R=0.02,
-                r=0.005,
-                e=0.002,
-                L=0.12,
-                I=5e-4,
-                J=1e-4,
-                k=25.0,
-                delta=0.01,
-                k_t=0.08,
-                k_b=0.08,
-                R_M=2.0,
-                L_M=0.01,
-                trainable_params=("J", "k", "delta", "k_t"),
-                learning_rate=5e-4,
-                epochs=1500,
-                integration_substeps=50,
+        "stribeck_physics": BenchmarkCase(
+            key="stribeck_physics",
+            name="StribeckPhysics",
+            factory=lambda dt: StribeckPhysics(
+                dt=dt,
+                solver="rk4",
+                learning_rate=1e-3,
+                epochs=1000,
             ),
         ),
         "lstm": BenchmarkCase(
@@ -185,9 +172,11 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
                 sampling_time=dt,
                 tau=1.0,
                 hidden_layers=[64, 64],
-                learning_rate=5e-4,
-                epochs=500,
+                learning_rate=1e-3,
+                epochs=1000,
                 sequence_length=50,
+                integration_substeps=5,
+                training_mode="full",
             ),
         ),
         "mamba": BenchmarkCase(
@@ -232,6 +221,45 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
                 learning_rate=1e-3,
                 epochs=200,
                 batch_size=32,
+            ),
+        ),
+        "vanilla_node_2d": BenchmarkCase(
+            key="vanilla_node_2d",
+            name="VanillaNODE2D",
+            factory=lambda dt: VanillaNODE2D(
+                hidden_dim=128,
+                dt=dt,
+                solver="rk4",
+                learning_rate=0.01,
+                epochs=5000,
+                k_steps=20,
+                batch_size=128,
+            ),
+        ),
+        "structured_node": BenchmarkCase(
+            key="structured_node",
+            name="StructuredNODE",
+            factory=lambda dt: StructuredNODE(
+                hidden_dim=128,
+                dt=dt,
+                solver="rk4",
+                learning_rate=0.01,
+                epochs=5000,
+                k_steps=20,
+                batch_size=128,
+            ),
+        ),
+        "adaptive_node": BenchmarkCase(
+            key="adaptive_node",
+            name="AdaptiveNODE",
+            factory=lambda dt: AdaptiveNODE(
+                hidden_dim=128,
+                dt=dt,
+                solver="rk4",
+                learning_rate=0.005,
+                epochs=5000,
+                k_steps=20,
+                batch_size=128,
             ),
         ),
     }

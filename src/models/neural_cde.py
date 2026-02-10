@@ -9,7 +9,7 @@ Reference implementation: https://github.com/patrick-kidger/torchcde
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Sequence
 
 import numpy as np
 
@@ -116,10 +116,12 @@ class NeuralCDE(BaseModel):
         interpolation: str = "cubic",
         solver: str = "rk4",
         learning_rate: float = 1e-3,
+        lr: float | None = None,
         epochs: int = 100,
         rtol: float = 1e-4,
         atol: float = 1e-5,
         sequence_length: int = 50,
+        windows_per_epoch: int = 24,
     ):
         super().__init__(nu=input_dim, ny=1)
         self.hidden_dim = int(hidden_dim)
@@ -127,11 +129,14 @@ class NeuralCDE(BaseModel):
         self.hidden_layers = list(hidden_layers)
         self.interpolation = interpolation
         self.solver = solver
+        if lr is not None:
+            learning_rate = float(lr)
         self.learning_rate = float(learning_rate)
         self.epochs = int(epochs)
         self.rtol = float(rtol)
         self.atol = float(atol)
         self.sequence_length = int(sequence_length)
+        self.windows_per_epoch = int(windows_per_epoch)
 
         if self.solver not in self._VALID_SOLVERS:
             raise ValueError(
@@ -225,7 +230,6 @@ class NeuralCDE(BaseModel):
         ``z_path`` has shape ``(batch, length, hidden_dim)``.
         ``y_pred`` has shape ``(batch, length, 1)`` (normalised).
         """
-        import torch
         import torchcde
 
         # z0 from the first observation — the "official" pattern
@@ -262,8 +266,8 @@ class NeuralCDE(BaseModel):
 
     def fit(
         self,
-        u: np.ndarray,
-        y: np.ndarray,
+        u: np.ndarray | Sequence[np.ndarray],
+        y: np.ndarray | Sequence[np.ndarray],
         verbose: bool = True,
         wandb_run=None,
         wandb_log_every: int = 1,
@@ -299,11 +303,36 @@ class NeuralCDE(BaseModel):
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._dtype = torch.float32
 
-        # --- normalise & convert to tensor ---
-        x_full = self._normalise_and_build_tensor(u, y, fit_stats=True)
-        n_total = x_full.shape[1]
+        is_multi = isinstance(u, Sequence) and not isinstance(u, np.ndarray)
+        if is_multi != (isinstance(y, Sequence) and not isinstance(y, np.ndarray)):
+            raise ValueError("u and y must both be arrays or both be dataset lists")
 
-        input_channels = x_full.shape[2]  # 3 = [t, u, y]
+        if is_multi:
+            if len(u) != len(y):
+                raise ValueError("u and y dataset lists must have the same length")
+            u_data = [np.asarray(u_ds, dtype=np.float64).flatten() for u_ds in u]
+            y_data = [np.asarray(y_ds, dtype=np.float64).flatten() for y_ds in y]
+            for u_ds, y_ds in zip(u_data, y_data):
+                if len(u_ds) != len(y_ds):
+                    raise ValueError("Each dataset pair must have u and y with equal length")
+            u_concat = np.concatenate([u_ds.reshape(-1, 1) for u_ds in u_data], axis=0)
+            y_concat = np.concatenate([y_ds.reshape(-1, 1) for y_ds in y_data], axis=0)
+            self._u_mean = float(u_concat.mean())
+            self._u_std = float(u_concat.std()) + 1e-8
+            self._y_mean = float(y_concat.mean())
+            self._y_std = float(y_concat.std()) + 1e-8
+            x_datasets = [
+                self._normalise_and_build_tensor(u_ds, y_ds, fit_stats=False)
+                for u_ds, y_ds in zip(u_data, y_data)
+            ]
+        else:
+            u_data = np.asarray(u, dtype=np.float64).flatten()
+            y_data = np.asarray(y, dtype=np.float64).flatten()
+            if len(u_data) != len(y_data):
+                raise ValueError("u and y must have the same length")
+            x_datasets = [self._normalise_and_build_tensor(u_data, y_data, fit_stats=True)]
+
+        input_channels = x_datasets[0].shape[2]  # 3 = [t, u, y]
 
         # --- build sub-modules ---
         self.cde_func_ = _build_cde_func(
@@ -329,15 +358,35 @@ class NeuralCDE(BaseModel):
         )
         optimizer = optim.Adam(all_params, lr=self.learning_rate)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, patience=15, factor=0.5, min_lr=1e-6,
+            optimizer, patience=200, factor=0.5, min_lr=1e-6,
         )
         criterion = torch.nn.MSELoss()
 
-        # --- subsequence indices ---
-        seq_len = min(self.sequence_length, n_total)
-        n_windows = max(1, n_total - seq_len)
-        # Multiple windows per epoch for more stable gradients
-        windows_per_epoch = max(1, n_total // seq_len)
+        # --- subsequence indices (single or multi-dataset) ---
+        dataset_windows = []
+        for x_ds in x_datasets:
+            n_total_ds = int(x_ds.shape[1])
+            if n_total_ds <= 0:
+                continue
+            seq_len_ds = min(self.sequence_length, n_total_ds)
+            n_windows_ds = max(1, n_total_ds - seq_len_ds)
+            dataset_windows.append((x_ds, seq_len_ds, n_windows_ds))
+
+        if not dataset_windows:
+            raise ValueError("No non-empty datasets available for NeuralCDE training")
+
+        ds_weights = np.asarray([n_windows for _, _, n_windows in dataset_windows], dtype=float)
+        ds_weights = ds_weights / np.sum(ds_weights)
+        windows_per_epoch = max(
+            1,
+            int(
+                sum(
+                    max(1, int(x_ds.shape[1]) // max(1, seq_len_ds))
+                    for x_ds, seq_len_ds, _ in dataset_windows
+                )
+            ),
+        )
+        windows_per_epoch = min(windows_per_epoch, self.windows_per_epoch)
 
         # --- best model checkpointing ---
         import copy
@@ -357,11 +406,13 @@ class NeuralCDE(BaseModel):
 
             epoch_loss = 0.0
             for _ in range(windows_per_epoch):
-                # random start for this window
+                # Random dataset + random start window
+                ds_idx = int(np.random.choice(len(dataset_windows), p=ds_weights))
+                x_source, seq_len, n_windows = dataset_windows[ds_idx]
                 start = int(torch.randint(0, max(1, n_windows), (1,)).item())
                 end = start + seq_len
 
-                x_window = x_full[:, start:end, :].clone()
+                x_window = x_source[:, start:end, :].clone()
 
                 # Re-normalise time within the window to [0, 1]
                 x_window[:, :, 0] = torch.linspace(

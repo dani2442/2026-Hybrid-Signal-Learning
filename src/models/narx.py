@@ -27,7 +27,17 @@ class NARX(BaseModel):
         ny: int = 1,
         poly_order: int = 2,
         selection_criteria: float = 0.01,
+        max_lag: int | None = None,
     ):
+        if max_lag is not None:
+            max_lag = int(max_lag)
+            if max_lag < 0:
+                raise ValueError("max_lag must be non-negative")
+            if (nu != 1 or ny != 1) and (nu != max_lag or ny != max_lag):
+                raise ValueError("Use either max_lag or nu/ny, not conflicting values")
+            nu = max_lag
+            ny = max_lag
+
         super().__init__(nu=nu, ny=ny)
         self.poly_order = poly_order
         self.selection_criteria = selection_criteria

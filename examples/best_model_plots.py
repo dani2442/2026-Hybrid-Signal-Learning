@@ -272,13 +272,6 @@ def plot_best_prediction(
     plt.close(fig)
 
 
-# ── continuous-time model subset ───────────────────────────────────────
-CONTINUOUS_TIME_KEYS = [
-    "neural_ode", "neural_sde", "neural_cde", "ude",
-    "hybrid_linear_beam", "hybrid_nonlinear_cam",
-]
-
-
 # ── CLI ────────────────────────────────────────────────────────────────
 def _parse_csv(v: str) -> list[str]:
     return [s.strip() for s in v.split(",") if s.strip()]

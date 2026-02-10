@@ -16,6 +16,10 @@ from .ude import UDE
 from .mamba import Mamba
 from .hybrid_linear_beam import HybridLinearBeam
 from .hybrid_nonlinear_cam import HybridNonlinearCam
+from .physics_ode import LinearPhysics, StribeckPhysics
+from .blackbox_ode import VanillaNODE2D, StructuredNODE, AdaptiveNODE
+from .blackbox_cde import VanillaNCDE2D, StructuredNCDE, AdaptiveNCDE
+from .blackbox_sde import VanillaNSDE2D, StructuredNSDE, AdaptiveNSDE
 
 __all__ = [
     "BaseModel",
@@ -34,4 +38,15 @@ __all__ = [
     "Mamba",
     "HybridLinearBeam",
     "HybridNonlinearCam",
+    "LinearPhysics",
+    "StribeckPhysics",
+    "VanillaNODE2D",
+    "StructuredNODE",
+    "AdaptiveNODE",
+    "VanillaNCDE2D",
+    "StructuredNCDE",
+    "AdaptiveNCDE",
+    "VanillaNSDE2D",
+    "StructuredNSDE",
+    "AdaptiveNSDE",
 ]

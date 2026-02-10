@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from itertools import chain
-from typing import List
+from typing import List, Sequence
 
 import numpy as np
 
@@ -30,7 +30,6 @@ class _ControlledNeuralSDEFunc(ControlledPathMixin):
         dt: float,
     ):
         import torch
-        import torch.nn as nn
 
         self.state_dim = int(state_dim)
         self.input_dim = int(input_dim)
@@ -135,8 +134,10 @@ class NeuralSDE(BaseModel):
         solver: str = "euler",
         dt: float = 0.05,
         learning_rate: float = 1e-3,
+        lr: float | None = None,
         epochs: int = 100,
         sequence_length: int = 50,
+        sequences_per_epoch: int = 24,
     ):
         super().__init__(nu=input_dim, ny=state_dim)
         self.state_dim = int(state_dim)
@@ -145,9 +146,12 @@ class NeuralSDE(BaseModel):
         self.diffusion_hidden_layers = list(diffusion_hidden_layers)
         self.solver = solver
         self.dt = float(dt)
+        if lr is not None:
+            learning_rate = float(lr)
         self.learning_rate = float(learning_rate)
         self.epochs = int(epochs)
         self.sequence_length = int(sequence_length)
+        self.sequences_per_epoch = int(sequences_per_epoch)
 
         if self.solver not in self._SUPPORTED_SOLVERS:
             supported = ", ".join(sorted(self._SUPPORTED_SOLVERS))
@@ -185,8 +189,8 @@ class NeuralSDE(BaseModel):
 
     def fit(
         self,
-        u: np.ndarray,
-        y: np.ndarray,
+        u: np.ndarray | Sequence[np.ndarray],
+        y: np.ndarray | Sequence[np.ndarray],
         verbose: bool = True,
         wandb_run=None,
         wandb_log_every: int = 1,
@@ -197,8 +201,27 @@ class NeuralSDE(BaseModel):
         except ImportError:
             raise ImportError("PyTorch required. Install with: pip install torch")
 
-        u = np.asarray(u, dtype=float).reshape(-1, self.input_dim)
-        y = np.asarray(y, dtype=float).reshape(-1, self.state_dim)
+        is_multi = isinstance(u, Sequence) and not isinstance(u, np.ndarray)
+        if is_multi != (isinstance(y, Sequence) and not isinstance(y, np.ndarray)):
+            raise ValueError("u and y must both be arrays or both be dataset lists")
+
+        if is_multi:
+            if len(u) != len(y):
+                raise ValueError("u and y dataset lists must have the same length")
+            u_data = [
+                np.asarray(u_ds, dtype=float).reshape(-1, self.input_dim) for u_ds in u
+            ]
+            y_data = [
+                np.asarray(y_ds, dtype=float).reshape(-1, self.state_dim) for y_ds in y
+            ]
+            for u_ds, y_ds in zip(u_data, y_data):
+                if len(u_ds) != len(y_ds):
+                    raise ValueError("Each dataset pair must have u and y with equal length")
+        else:
+            u_data = np.asarray(u, dtype=float).reshape(-1, self.input_dim)
+            y_data = np.asarray(y, dtype=float).reshape(-1, self.state_dim)
+            if len(u_data) != len(y_data):
+                raise ValueError("u and y must have the same length")
 
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._dtype = torch.float32
@@ -213,8 +236,8 @@ class NeuralSDE(BaseModel):
         self.training_loss_ = train_sequence_batches(
             sde_func=self.sde_func_,
             simulate_fn=lambda u_seq, x0: self._simulate_trajectory(u_seq, x0),
-            u=u,
-            y=y,
+            u=u_data,
+            y=y_data,
             input_dim=self.input_dim,
             state_dim=self.state_dim,
             sequence_length=self.sequence_length,
@@ -226,6 +249,7 @@ class NeuralSDE(BaseModel):
             progress_desc="Training NeuralSDE",
             wandb_run=wandb_run,
             wandb_log_every=wandb_log_every,
+            sequences_per_epoch=self.sequences_per_epoch,
         )
 
         self._is_fitted = True

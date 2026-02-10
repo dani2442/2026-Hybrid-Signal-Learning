@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Sequence
 
 import numpy as np
 
@@ -130,6 +130,8 @@ def optimize_with_adam(
     learning_rate: float,
     on_epoch_end: Callable[[int, float, float], None] | None = None,
     max_grad_norm: float | None = 1.0,
+    verbose: bool = False,
+    progress_desc: str = "Optimizing",
 ) -> list[float]:
     """Run a generic Adam loop and return per-epoch loss history.
 
@@ -141,6 +143,8 @@ def optimize_with_adam(
         on_epoch_end: Optional callback ``(epoch, loss, grad_norm) -> None``.
         max_grad_norm: If not *None*, clip the global gradient norm to this
             value every step to prevent NaN propagation in stiff systems.
+        verbose: Show tqdm progress bar.
+        progress_desc: Description for the progress bar.
     """
     import torch
     import torch.optim as optim
@@ -151,7 +155,13 @@ def optimize_with_adam(
         return history
 
     optimizer = optim.Adam(params, lr=float(learning_rate))
-    for epoch in range(int(epochs)):
+
+    epoch_iter = range(int(epochs))
+    if verbose:
+        from tqdm.auto import tqdm
+        epoch_iter = tqdm(epoch_iter, desc=progress_desc, unit="epoch")
+
+    for epoch in epoch_iter:
         optimizer.zero_grad()
         loss = loss_fn()
 
@@ -188,6 +198,8 @@ def optimize_with_adam(
 
         loss_value = float(loss.detach().cpu().item())
         history.append(loss_value)
+        if verbose and hasattr(epoch_iter, "set_postfix"):
+            epoch_iter.set_postfix(loss=loss_value)
         if on_epoch_end is not None:
             on_epoch_end(epoch + 1, loss_value, grad_norm)
     return history
@@ -205,11 +217,59 @@ def gradient_norm(parameters: Iterable) -> float:
     return float(np.sqrt(total))
 
 
+def _prepare_subsequence_datasets(
+    u,
+    y,
+    input_dim: int,
+    state_dim: int,
+    sequence_length: int,
+) -> list[tuple[np.ndarray, np.ndarray, int]]:
+    """Normalise single/multi-dataset inputs for subsequence training.
+
+    Returns a list of tuples ``(u_ds, y_ds, n_sequences)`` where:
+      - ``u_ds`` has shape ``[N, input_dim]``
+      - ``y_ds`` has shape ``[N, state_dim]``
+      - ``n_sequences = N - sequence_length`` is the number of valid windows
+    """
+    seq_len = int(sequence_length)
+
+    def _coerce_pair(u_arr, y_arr) -> tuple[np.ndarray, np.ndarray]:
+        u_np = np.asarray(u_arr, dtype=float).reshape(-1, int(input_dim))
+        y_np = np.asarray(y_arr, dtype=float).reshape(-1, int(state_dim))
+        if len(u_np) != len(y_np):
+            raise ValueError("Each dataset pair must have u and y with equal length")
+        return u_np, y_np
+
+    datasets: list[tuple[np.ndarray, np.ndarray, int]] = []
+
+    is_multi = isinstance(u, Sequence) and not isinstance(u, np.ndarray)
+    if is_multi:
+        if not (isinstance(y, Sequence) and not isinstance(y, np.ndarray)):
+            raise ValueError("When u is a sequence of datasets, y must also be a sequence")
+        if len(u) != len(y):
+            raise ValueError("u and y dataset lists must have the same number of elements")
+
+        for u_ds, y_ds in zip(u, y):
+            u_np, y_np = _coerce_pair(u_ds, y_ds)
+            n_sequences = len(y_np) - seq_len
+            if n_sequences > 0:
+                datasets.append((u_np, y_np, int(n_sequences)))
+    else:
+        u_np, y_np = _coerce_pair(u, y)
+        n_sequences = len(y_np) - seq_len
+        if n_sequences > 0:
+            datasets.append((u_np, y_np, int(n_sequences)))
+
+    if not datasets:
+        raise ValueError("Not enough data for the requested sequence_length")
+    return datasets
+
+
 def train_sequence_batches(
     sde_func,
     simulate_fn: Callable,
-    u: np.ndarray,
-    y: np.ndarray,
+    u: np.ndarray | Sequence[np.ndarray],
+    y: np.ndarray | Sequence[np.ndarray],
     input_dim: int,
     state_dim: int,
     sequence_length: int,
@@ -221,21 +281,53 @@ def train_sequence_batches(
     progress_desc: str,
     wandb_run=None,
     wandb_log_every: int = 1,
+    sequences_per_epoch: int | None = None,
+    early_stopping_patience: int | None = None,
+    early_stopping_min_delta: float = 0.0,
+    state_loss_weights: Sequence[float] | None = None,
 ) -> list[float]:
-    """Train on random subsequences and return average loss per epoch."""
+    """Train on random subsequences and return average loss per epoch.
+
+    Supports:
+      - single dataset: ``u`` and ``y`` as numpy arrays
+      - multi-dataset: ``u`` and ``y`` as equally-sized lists/tuples of arrays
+    """
     import torch
     import torch.nn as nn
     import torch.optim as optim
     from tqdm.auto import tqdm
 
-    n_samples = len(y)
-    n_sequences = n_samples - int(sequence_length)
-    if n_sequences <= 0:
-        raise ValueError("Not enough data for given sequence length")
+    datasets = _prepare_subsequence_datasets(
+        u=u,
+        y=y,
+        input_dim=input_dim,
+        state_dim=state_dim,
+        sequence_length=sequence_length,
+    )
+    n_total_sequences = int(sum(n_seq for _, _, n_seq in datasets))
+    seq_weights = np.asarray([n_seq for _, _, n_seq in datasets], dtype=float)
+    seq_weights = seq_weights / np.sum(seq_weights)
+    if sequences_per_epoch is None:
+        sequences_per_epoch = max(1, min(100, n_total_sequences))
+    else:
+        sequences_per_epoch = max(1, min(int(sequences_per_epoch), n_total_sequences))
 
     params = list(sde_func.parameters())
     optimizer = optim.Adam(params, lr=float(learning_rate))
     criterion = nn.MSELoss()
+    loss_weights_t = None
+    if state_loss_weights is not None:
+        loss_weights_np = np.asarray(state_loss_weights, dtype=float).reshape(-1)
+        if loss_weights_np.shape[0] != int(state_dim):
+            raise ValueError("state_loss_weights must have length == state_dim")
+        if np.any(loss_weights_np < 0):
+            raise ValueError("state_loss_weights must be non-negative")
+        loss_weights_t = torch.tensor(loss_weights_np, dtype=dtype, device=device).reshape(
+            1, int(state_dim)
+        )
+    best_loss = float("inf")
+    best_state = None
+    bad_epochs = 0
 
     epoch_iter = range(int(epochs))
     if verbose:
@@ -246,27 +338,41 @@ def train_sequence_batches(
         sde_func.train()
         total_loss = 0.0
         total_grad_norm = 0.0
-        indices = np.random.permutation(n_sequences)[: min(100, n_sequences)]
+        for _ in range(sequences_per_epoch):
+            ds_idx = int(np.random.choice(len(datasets), p=seq_weights))
+            u_ds, y_ds, n_seq_ds = datasets[ds_idx]
+            idx = int(np.random.randint(0, n_seq_ds))
 
-        for idx in indices:
             y_seq = torch.tensor(
-                y[idx : idx + sequence_length], dtype=dtype, device=device
+                y_ds[idx : idx + sequence_length], dtype=dtype, device=device
             ).reshape(-1, state_dim)
             u_seq = torch.tensor(
-                u[idx : idx + sequence_length], dtype=dtype, device=device
+                u_ds[idx : idx + sequence_length], dtype=dtype, device=device
             ).reshape(-1, input_dim)
 
             optimizer.zero_grad()
             pred_seq = simulate_fn(u_seq, y_seq[0])
-            loss = criterion(pred_seq, y_seq)
+            if loss_weights_t is None:
+                loss = criterion(pred_seq, y_seq)
+            else:
+                sq_err = (pred_seq - y_seq) ** 2
+                loss = torch.mean(sq_err * loss_weights_t)
             loss.backward()
             total_grad_norm += gradient_norm(params)
             optimizer.step()
             total_loss += float(loss.detach().cpu().item())
 
-        avg_loss = total_loss / len(indices)
-        avg_grad_norm = total_grad_norm / len(indices)
+        avg_loss = total_loss / sequences_per_epoch
+        avg_grad_norm = total_grad_norm / sequences_per_epoch
         loss_history.append(avg_loss)
+
+        improved = avg_loss < (best_loss - float(early_stopping_min_delta))
+        if improved:
+            best_loss = avg_loss
+            best_state = [p.detach().clone() for p in params]
+            bad_epochs = 0
+        else:
+            bad_epochs += 1
 
         if verbose and hasattr(epoch_iter, "set_postfix"):
             epoch_iter.set_postfix(loss=avg_loss)
@@ -276,9 +382,26 @@ def train_sequence_batches(
                     "train/epoch": epoch + 1,
                     "train/loss": avg_loss,
                     "train/grad_norm": avg_grad_norm,
-                    "train/sequences_per_epoch": len(indices),
+                    "train/sequences_per_epoch": sequences_per_epoch,
+                    "train/best_loss": best_loss,
                 },
                 step=epoch + 1,
             )
+
+        if (
+            early_stopping_patience is not None
+            and int(early_stopping_patience) > 0
+            and bad_epochs >= int(early_stopping_patience)
+        ):
+            if verbose:
+                print(
+                    f"Early stopping: no improvement in {int(early_stopping_patience)} epochs "
+                    f"(best={best_loss:.6f})"
+                )
+            break
+
+    if best_state is not None:
+        for p, p_best in zip(params, best_state):
+            p.data.copy_(p_best)
 
     return loss_history

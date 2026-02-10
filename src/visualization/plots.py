@@ -16,6 +16,18 @@ def _check_matplotlib():
         raise ImportError("matplotlib required. Install with: pip install matplotlib")
 
 
+def _legend_outside(ax, **kwargs):
+    """Place legend outside plot area to avoid covering data."""
+    legend_kwargs = {
+        "loc": "upper left",
+        "bbox_to_anchor": (1.02, 1.0),
+        "borderaxespad": 0.0,
+        "framealpha": 0.9,
+    }
+    legend_kwargs.update(kwargs)
+    return ax.legend(**legend_kwargs)
+
+
 def _save_or_show(save_path: Optional[str] = None, dpi: int = 150):
     """Save figure to file or show interactively."""
     if save_path:
@@ -50,19 +62,19 @@ def plot_signals(
 
     fig, axes = plt.subplots(2, 1, figsize=figsize, sharex=True)
 
-    axes[0].plot(t, u, "b-", linewidth=0.8)
+    axes[0].plot(t, u, "b-", linewidth=0.8, label="u")
     axes[0].set_ylabel("Input (u)")
     axes[0].set_title(title)
     axes[0].grid(True, alpha=0.3)
-    axes[0].legend(["u"], loc="upper right")
+    _legend_outside(axes[0])
 
-    axes[1].plot(t, y, "r-", linewidth=0.8)
+    axes[1].plot(t, y, "r-", linewidth=0.8, label="y")
     axes[1].set_ylabel("Output (y)")
     axes[1].set_xlabel("Time (s)")
     axes[1].grid(True, alpha=0.3)
-    axes[1].legend(["y"], loc="upper right")
+    _legend_outside(axes[1])
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 0.82, 1])
     _save_or_show(save_path)
 
 
@@ -100,9 +112,9 @@ def plot_predictions(
     plt.xlabel("Time (s)")
     plt.ylabel("Output")
     plt.title(title)
-    plt.legend(loc="best")
+    _legend_outside(plt.gca())
     plt.grid(True, alpha=0.3)
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 0.82, 1])
     _save_or_show(save_path)
 
 
@@ -139,10 +151,10 @@ def plot_residuals(
     plt.xlabel("Time (s)")
     plt.ylabel("Residual (y - ŷ)")
     plt.title(title)
-    plt.legend(loc="best")
+    _legend_outside(plt.gca())
     plt.grid(True, alpha=0.3)
     plt.axhline(y=0, color="k", linestyle="-", linewidth=0.5)
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 0.82, 1])
     _save_or_show(save_path)
 
 
@@ -172,7 +184,7 @@ def plot_spectrograms(
     fig, axes = plt.subplots(2, 1, figsize=figsize)
 
     # Output spectrogram
-    Pyy, freqs, _, im = axes[0].specgram(y, NFFT=nfft, Fs=fs, noverlap=noverlap)
+    _, freqs, _, im = axes[0].specgram(y, NFFT=nfft, Fs=fs, noverlap=noverlap)
     axes[0].set_title("Output Signal Spectrogram")
     axes[0].set_ylabel("Frequency (Hz)")
     axes[0].set_yscale("log")
@@ -180,7 +192,7 @@ def plot_spectrograms(
     plt.colorbar(im, ax=axes[0], label="Intensity (dB)")
 
     # Input spectrogram
-    Puu, freqs, _, im = axes[1].specgram(u, NFFT=nfft, Fs=fs, noverlap=noverlap)
+    _, freqs, _, im = axes[1].specgram(u, NFFT=nfft, Fs=fs, noverlap=noverlap)
     axes[1].set_title("Input Signal Spectrogram")
     axes[1].set_xlabel("Time (s)")
     axes[1].set_ylabel("Frequency (Hz)")
@@ -231,8 +243,8 @@ def plot_model_comparison(
     ax.set_title("Model Comparison")
     ax.set_xticks(x)
     ax.set_xticklabels(metric_names)
-    ax.legend()
+    _legend_outside(ax)
     ax.grid(True, alpha=0.3, axis="y")
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 0.82, 1])
     _save_or_show(save_path)

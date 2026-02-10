@@ -339,18 +339,6 @@ class Dataset:
         return cls.from_mat(filename, **kwargs)
 
     @classmethod
-    def from_helon_github(cls, filename: str) -> "Dataset":
-        """
-        Load dataset from Helon's sysid GitHub repository.
-
-        Args:
-            filename: Name of the .mat file (e.g., '05_multisine_01.mat')
-        """
-        base_url = "https://raw.githubusercontent.com/helonayala/sysid/main/data"
-        url = f"{base_url}/{filename}"
-        return cls.from_url(url)
-
-    @classmethod
     def from_bab_experiment(
         cls,
         name: str,
