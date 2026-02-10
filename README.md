@@ -1,306 +1,369 @@
 # Hybrid Modeling
 
-System identification library that brings together classical models, neural continuous-time models, and physics-guided hybrid models under a single, consistent API.
+Hybrid Modeling is a system identification library that combines classical models, discrete-time machine learning models, neural continuous-time models, and physics-guided hybrids under one API.
 
-All models implement the same `BaseModel` interface:
+## What You Get
+
+- A shared interface for model fitting and prediction.
+- One-step-ahead (OSA) and free-run (FR) prediction modes.
+- Core families for interpretability, speed, and nonlinear expressiveness.
+- Continuous-time training with `torchdiffeq` / `torchsde`.
+- Reproducible benchmarking utilities.
+- Built-in loaders for BAB datasets, including `random_steps_03` and `random_steps_04`.
+
+## Unified API
+
+Every model follows `BaseModel`:
 
 - `fit(u, y)`
-- `predict_osa(u, y)` (one-step-ahead)
-- `predict_free_run(u, y_initial)` (free-run / rollout)
-
----
-
-## Features
-
-- 15 models across 4 families (classical, discrete-time ML, neural continuous-time, physics-guided hybrids)
-- Shared training and inference interface across families
-- One-step-ahead (OSA) and free-run prediction modes
-- `torchsde` support for continuous-time stochastic models
-- Optional Weights & Biases logging for continuous-time and hybrid models
-- Benchmark runner with reproducible presets
-
----
-
-## Models
-
-The library includes **15 models** organized into four families.
-
-## 1) Classical / Statistical Models
-
-### 1.1 NARX — Nonlinear AutoRegressive with eXogenous Inputs
-
-$$
-y(k)=\sum_i \theta_i\,\phi_i\!\big(y(k-1),\dots,y(k-n_y),\,u(k-1),\dots,u(k-n_u)\big)+e(k)
-$$
-
-where $\phi_i$ are polynomial basis functions up to order $p$, and terms are selected automatically via **FROLS** (Forward Regression with Orthogonal Least Squares).
-
-| Pros | Cons |
-|---|---|
-| Interpretable, fast to fit, built-in term selection, little hyperparameter tuning | Limited polynomial expressiveness; struggles with highly nonlinear or chaotic dynamics |
-
-### 1.2 ARIMA(X) — AutoRegressive Integrated Moving Average
-
-$$
-\Phi(B)(1-B)^d y(k)=\Theta(B)e(k)+\beta\,u(k)
-$$
-
-where $B$ is the backshift operator, $\Phi$ is the AR polynomial of order $p$, $\Theta$ is the MA polynomial of order $q$, $d$ is differencing order, and $u$ is an optional exogenous regressor.
-
-| Pros | Cons |
-|---|---|
-| Strong statistical foundation, handles trends/non-stationarity, interpretable coefficients | Linear model, cannot capture nonlinear dynamics, limited native multi-step exogenous support |
-
-### 1.3 Exponential Smoothing (Holt-Winters)
-
-$$
-\hat y(k+1)=\alpha\,y(k)+(1-\alpha)\,\hat y(k)
-$$
-
-Extended with additive/multiplicative trend ($\beta$) and seasonal ($\gamma$) components.
-
-| Pros | Cons |
-|---|---|
-| Very fast, good for smooth/trending signals, minimal tuning | Univariate (ignores input $u$), linear, not a dynamical model |
-
----
-
-## 2) Machine Learning Models (Discrete-Time)
-
-All discrete-time ML models use lagged regressors and/or sequences derived from $[y,u]$.
-
-### 2.1 Random Forest
-
-$$
-y(k)=\frac{1}{T}\sum_{t=1}^{T}f_t\!\big(\mathbf{x}(k)\big),\quad
-\mathbf{x}(k)=\big[y(k-1),\dots,y(k-n_y),\,u(k-1),\dots,u(k-n_u)\big]
-$$
-
-| Pros | Cons |
-|---|---|
-| Non-parametric, captures nonlinearities without manual feature engineering, robust to overfitting | Stateless, weak extrapolation outside training range, low interpretability |
-
-### 2.2 Neural Network (MLP)
-
-$$
-y(k)=W_L\,\sigma\!\big(\cdots \sigma(W_1\mathbf{x}(k)+b_1)\cdots\big)+b_L
-$$
-
-| Pros | Cons |
-|---|---|
-| Universal approximation, differentiable, learns complex input-output maps | Stateless, needs normalization and tuning, can overfit small datasets |
-
-### 2.3 GRU — Gated Recurrent Unit
-
-$$
-z_k=\sigma\!\left(W_z[\mathbf{h}_{k-1},\mathbf{x}_k]\right),\quad
-r_k=\sigma\!\left(W_r[\mathbf{h}_{k-1},\mathbf{x}_k]\right)
-$$
-
-$$
-\tilde{\mathbf{h}}_k=\tanh\!\left(W_h[r_k\odot \mathbf{h}_{k-1},\mathbf{x}_k]\right),\quad
-\mathbf{h}_k=(1-z_k)\odot \mathbf{h}_{k-1}+z_k\odot \tilde{\mathbf{h}}_k
-$$
-
-$$
-y(k)=W_o\mathbf{h}_k+b_o
-$$
-
-Input is a sequence of $[y,u]$ pairs of length `max_lag`.
-
-| Pros | Cons |
-|---|---|
-| Captures temporal dependencies, fewer parameters than LSTM, fast training | Can struggle with very long memory, sequential computation limits parallelism |
-
-### 2.4 LSTM — Long Short-Term Memory
-
-$$
-f_k=\sigma(W_f[\mathbf{h}_{k-1},\mathbf{x}_k]+b_f),\quad
-i_k=\sigma(W_i[\mathbf{h}_{k-1},\mathbf{x}_k]+b_i)
-$$
-
-$$
-\tilde{\mathbf{c}}_k=\tanh(W_c[\mathbf{h}_{k-1},\mathbf{x}_k]+b_c),\quad
-\mathbf{c}_k=f_k\odot \mathbf{c}_{k-1}+i_k\odot \tilde{\mathbf{c}}_k
-$$
-
-$$
-o_k=\sigma(W_o[\mathbf{h}_{k-1},\mathbf{x}_k]+b_o),\quad
-\mathbf{h}_k=o_k\odot \tanh(\mathbf{c}_k),\quad
-y(k)=W_y\mathbf{h}_k+b_y
-$$
-
-| Pros | Cons |
-|---|---|
-| Strong long-range memory via cell state, widely used baseline | More parameters than GRU, sequential, slower training |
-
-### 2.5 TCN — Temporal Convolutional Network
-
-$$
-y(k)=W_o\;\mathrm{ResBlock}_L\!\big(\cdots\mathrm{ResBlock}_1(\mathbf{X})\cdots\big)\Big|_{t=\text{last}}
-$$
-
-Each residual block applies two causal dilated 1D convolutions:
-
-$$
-\mathrm{ResBlock}_l:\;
-h=\mathrm{ReLU}\!\left(\mathrm{CausalConv}_{d=2^l}(x)\right),\quad
-\mathrm{out}=\mathrm{ReLU}(h+\mathrm{skip}(x))
-$$
-
-| Pros | Cons |
-|---|---|
-| Parallelizable (no recurrence), stable gradients, large receptive field with few layers | Fixed receptive field, no persistent hidden state across free-run steps, memory grows with sequence length |
-
-### 2.6 Mamba — Selective State Space Model (S6)
-
-Continuous-time SSM with input-dependent discretization:
-
-$$
-\mathbf{x}'(t)=\mathbf{A}\mathbf{x}(t)+\mathbf{B}(u)\,u(t),\qquad
-y(t)=\mathbf{C}(u)\mathbf{x}(t)+D\,u(t)
-$$
-
-Discretized with learned step size $\Delta(u)$:
-
-$$
-\bar{\mathbf{A}}=e^{\Delta\mathbf{A}},\quad
-\bar{\mathbf{B}}=\Delta\mathbf{B},\quad
-\mathbf{x}_k=\bar{\mathbf{A}}\mathbf{x}_{k-1}+\bar{\mathbf{B}}u_k
-$$
-
-| Pros | Cons |
-|---|---|
-| Linear-time sequence processing, strong long-range dependencies, control-theoretic grounding | Slower without fused kernels, more complex tuning, newer architecture |
-
----
-
-## 3) Neural Continuous-Time Models
-
-### 3.1 Neural ODE
-
-$$
-\frac{d\mathbf{x}}{dt}=f_\theta(\mathbf{x},u),\qquad \mathbf{x}(0)=\mathbf{x}_0
-$$
-
-The dynamics $f_\theta$ are parameterized by an MLP. Trajectories are obtained by numerical integration.
-
-| Pros | Cons |
-|---|---|
-| Continuous-time formulation, supports irregular sampling, principled dynamics modeling | Slower training due to ODE solves, stiff systems can be challenging, deterministic |
-
-### 3.2 Neural SDE
-
-$$
-d\mathbf{x}=f_\theta(\mathbf{x},u)\,dt+g_\phi(\mathbf{x},u)\,dW_t
-$$
-
-Adds a learned diffusion term $g_\phi$ (It\^o integration via `torchsde`).
-
-| Pros | Cons |
-|---|---|
-| Captures stochasticity and aleatoric uncertainty | Harder optimization (noisy gradients), possible diffusion collapse, slower than Neural ODE |
-
-### 3.3 Neural CDE — Neural Controlled Differential Equation
-
-$$
-\frac{d\mathbf{z}}{dt}=f_\theta(\mathbf{z})\,\frac{dX}{dt},\qquad
-\mathbf{z}(0)=\zeta_\psi\!\big(X(t_0)\big)
-$$
-
-where $X(t)$ is a continuous interpolation (e.g., cubic spline) of the observed path $[t,u,y]$, and $f_\theta(\mathbf{z})$ outputs a $(d_z\times d_X)$ matrix multiplied by path derivative.
-
-| Pros | Cons |
-|---|---|
-| Strong for irregularly sampled time series, input-driven continuous dynamics, strong theory | Requires interpolation step, usually slowest to train, highest implementation complexity |
-
----
-
-## 4) Physics-Guided Hybrid Models
-
-### 4.1 Hybrid Linear Beam
-
-Second-order beam dynamics with trainable physical parameters:
-
-$$
-J\ddot{\theta}+R\dot{\theta}+K(\theta+\delta)=\tau V
-$$
-
-Parameters $(J,R,K,\delta)$ are initialized (least squares) and refined with gradient descent through the ODE integrator. Positivity is enforced with softplus reparameterization (e.g., $J=\mathrm{softplus}(J_{\mathrm{raw}})$).
-
-| Pros | Cons |
-|---|---|
-| Interpretable parameters, data-efficient, stronger extrapolation inside the physics regime | Depends on model correctness, limited flexibility for strong unmodeled nonlinearities |
-
-### 4.2 Hybrid Nonlinear Cam
-
-Full nonlinear cam-bar-motor mechanism:
-
-$$
-J_{\mathrm{eff}}(\theta)\ddot{\theta}=
-\tau_{\mathrm{motor}}(V,\dot{\theta})
--k\,(y(\theta)-\delta)\,A(\theta)
--B(\theta)\,\dot{\theta}^2
-$$
-
-with geometry terms $y(\theta),A(\theta),B(\theta)$ derived from the cam profile. Selected parameters (e.g., $J,k,\delta,k_t$) are trainable; others may come from CAD or measurements.
-
-| Pros | Cons |
-|---|---|
-| High physical fidelity, few trainable degrees of freedom, robust under distribution shift | Requires detailed physics, can be stiff (needs sub-stepping), model-specific |
-
-### 4.3 UDE — Universal Differential Equation
-
-Known physics prior plus neural residual:
-
-$$
-\frac{d\theta}{dt}=\omega,\qquad
-\frac{d\omega}{dt}=
-\underbrace{\frac{\tau V-R\omega-K(\theta+\delta)}{J}}_{\text{physics}}
-+
-\underbrace{f_{\mathrm{nn}}(\theta,\omega,V)}_{\text{neural residual}}
-$$
-
-Physical parameters $(J,R,K,\delta)$ and NN weights are trained jointly. Residual weights are often initialized small so physics dominates early training.
-
-| Pros | Cons |
-|---|---|
-| Physics inductive bias plus neural flexibility, interpretable physical parameters | Without regularization, NN may absorb physics, training cost near Neural ODE, requires a useful prior |
-
----
-
-## Model Summary
-
-| Model | Family | Time | Stateful | Physics | Params (typical) |
-|---|---|---|---|---|---|
-| NARX | Classical | Discrete | No | No | ~50 |
-| ARIMA(X) | Classical | Discrete | No | No | ~5 |
-| Exponential Smoothing | Classical | Discrete | No | No | ~3 |
-| Random Forest | ML | Discrete | No | No | Depends on trees/depth |
-| Neural Network (MLP) | ML | Discrete | No | No | ~10K |
-| GRU | ML | Discrete | Yes | No | ~50K |
-| LSTM | ML | Discrete | Yes | No | ~50K |
-| TCN | ML | Discrete | No | No | ~87K |
-| Mamba | ML | Discrete | Yes | No | ~50K |
-| Neural ODE | Neural CT | Continuous | Yes | No | ~10K |
-| Neural SDE | Neural CT | Continuous | Yes | No | ~20K |
-| Neural CDE | Neural CT | Continuous | Yes | No | ~15K |
-| Hybrid Linear Beam | Hybrid | Continuous | Yes | Yes | 4 |
-| Hybrid Nonlinear Cam | Hybrid | Continuous | Yes | Yes | ~4 (trainable subset) |
-| UDE | Hybrid | Continuous | Yes | Yes | ~10K + 4 |
-
----
+- `predict_osa(u, y)`
+- `predict_free_run(u, y_initial)`
+- `predict(u, y, mode="OSA" | "FR")`
+
+```python
+from src import NARX
+
+model = NARX(max_lag=10)
+model.fit(u_train, y_train)
+
+y_osa = model.predict_osa(u_test, y_test)
+y_fr = model.predict_free_run(u_test, y_test[: model.max_lag])
+```
 
 ## Installation
 
-This repository currently assumes a source checkout (no published wheel yet). Install dependencies with:
+Python requirement: `>=3.13`
+
+Option 1 (recommended with `uv`):
 
 ```bash
-pip install numpy scipy matplotlib torch torchsde tqdm statsmodels scikit-learn wandb
+uv sync
 ```
 
-(Optional, for editable local development)
+Option 2 (pip):
 
 ```bash
 pip install -e .
 ```
+
+Main dependencies:
+
+- `numpy`, `scipy`, `matplotlib`
+- `scikit-learn`, `statsmodels`
+- `torch`, `torchdiffeq`, `torchsde`, `torchcde`
+- `tqdm`, `wandb`
+
+## Dataset Loading
+
+Use the built-in dataset helper:
+
+```python
+from src import Dataset
+
+print(Dataset.list_bab_experiments())
+ds = Dataset.from_bab_experiment("multisine_05", preprocess=True, resample_factor=50)
+print(ds)
+```
+
+Available experiment keys:
+
+- `rampa_positiva`
+- `rampa_negativa`
+- `random_steps_01`
+- `random_steps_02`
+- `random_steps_03`
+- `random_steps_04`
+- `swept_sine`
+- `multisine_05`
+- `multisine_06`
+
+## Mathematical Notation
+
+The equations below use one consistent style:
+
+- Discrete index: `k`
+- Continuous time: `t`
+- Input: `u_k` or `u(t)`
+- Output: `y_k` or `y(t)`
+- State: `x_k` or `x(t)`
+- Position and velocity states: `theta`, `omega`
+
+## Core Models (15)
+
+The library includes 15 core models across four families.
+
+### 1) Classical / Statistical Models
+
+#### 1.1 NARX
+
+$$
+y_k = \sum_{i=1}^{M} \theta_i \phi_i\left(
+y_{k-1}, \ldots, y_{k-n_y},
+u_{k-1}, \ldots, u_{k-n_u}
+\right) + e_k
+$$
+
+Polynomial terms are selected with FROLS.
+
+#### 1.2 ARIMA(X)
+
+$$
+\Phi(B) (1 - B)^d y_k = \Theta(B) e_k + \beta u_k
+$$
+
+`B` is the backshift operator.
+
+#### 1.3 Exponential Smoothing (Holt-Winters)
+
+$$
+\hat{y}_{k+1|k} = \alpha y_k + (1-\alpha)\hat{y}_{k|k-1}
+$$
+
+Extended with optional trend and seasonality terms.
+
+### 2) Machine Learning Models (Discrete-Time)
+
+#### 2.1 Random Forest
+
+$$
+y_k = \frac{1}{T}\sum_{t=1}^{T} f_t(x_k), \quad
+x_k = [y_{k-1}, \ldots, y_{k-n_y}, u_{k-1}, \ldots, u_{k-n_u}]
+$$
+
+#### 2.2 Neural Network (MLP)
+
+$$
+y_k = W_L \sigma\left(\cdots \sigma(W_1 x_k + b_1)\cdots\right) + b_L
+$$
+
+#### 2.3 GRU
+
+$$
+z_k = \sigma(W_z[h_{k-1}, x_k]), \quad
+r_k = \sigma(W_r[h_{k-1}, x_k])
+$$
+
+$$
+\tilde{h}_k = \tanh(W_h[r_k \odot h_{k-1}, x_k]), \quad
+h_k = (1-z_k)\odot h_{k-1} + z_k \odot \tilde{h}_k
+$$
+
+$$
+y_k = W_o h_k + b_o
+$$
+
+#### 2.4 LSTM
+
+$$
+f_k = \sigma(W_f[h_{k-1}, x_k] + b_f), \quad
+i_k = \sigma(W_i[h_{k-1}, x_k] + b_i)
+$$
+
+$$
+\tilde{c}_k = \tanh(W_c[h_{k-1}, x_k] + b_c), \quad
+c_k = f_k \odot c_{k-1} + i_k \odot \tilde{c}_k
+$$
+
+$$
+o_k = \sigma(W_o[h_{k-1}, x_k] + b_o), \quad
+h_k = o_k \odot \tanh(c_k), \quad
+y_k = W_y h_k + b_y
+$$
+
+#### 2.5 TCN
+
+$$
+y_k = W_o \mathrm{ResBlock}_L\left(\cdots \mathrm{ResBlock}_1(X)\cdots\right)\Big|_{t=\mathrm{last}}
+$$
+
+Each residual block uses causal dilated convolutions.
+
+#### 2.6 Mamba (Selective State Space Model)
+
+Continuous form:
+
+$$
+\dot{x}(t) = A x(t) + B(u(t))u(t), \quad
+y(t) = C(u(t))x(t) + D u(t)
+$$
+
+Input-dependent discretization:
+
+$$
+\bar{A}_k = \exp(\Delta_k A), \quad
+\bar{B}_k = \Delta_k B_k, \quad
+x_k = \bar{A}_k x_{k-1} + \bar{B}_k u_k
+$$
+
+$$
+y_k = \bar{C}_k x_k + D u_k
+$$
+
+### 3) Neural Continuous-Time Models
+
+#### 3.1 Neural ODE
+
+$$
+\dot{x}(t) = f_{\theta}(x(t), u(t)), \quad x(0) = x_0
+$$
+
+#### 3.2 Neural SDE
+
+$$
+dx(t) = f_{\theta}(x(t), u(t))dt + g_{\phi}(x(t), u(t))dW_t
+$$
+
+#### 3.3 Neural CDE
+
+$$
+\dot{z}(t) = f_{\theta}(z(t))\dot{X}(t), \quad z(t_0) = z_0
+$$
+
+`X(t)` is a continuous interpolation of observed signals.
+
+### 4) Physics-Guided Hybrid Models
+
+#### 4.1 Hybrid Linear Beam
+
+$$
+J\ddot{\theta} + R\dot{\theta} + K(\theta + \delta) = \tau V
+$$
+
+#### 4.2 Hybrid Nonlinear Cam
+
+$$
+J_{\mathrm{eff}}(\theta)\ddot{\theta} =
+\tau_{\mathrm{motor}}(V, \dot{\theta})
+- k\big(y(\theta)-\delta\big)A(\theta)
+- B(\theta)\dot{\theta}^{2}
+$$
+
+#### 4.3 UDE (Universal Differential Equation)
+
+$$
+\dot{\theta} = \omega
+$$
+
+$$
+\dot{\omega} = \frac{\tau V - R\omega - K(\theta+\delta)}{J} + r_{\phi}(\omega)
+$$
+
+In this implementation, the residual network is applied to `omega`.
+
+## Core Model Summary
+
+| Model | Family | Time Domain | Stateful | Physics Prior |
+| --- | --- | --- | --- | --- |
+| NARX | Classical | Discrete | No | No |
+| ARIMA(X) | Classical | Discrete | No | No |
+| Exponential Smoothing | Classical | Discrete | No | No |
+| Random Forest | ML | Discrete | No | No |
+| Neural Network (MLP) | ML | Discrete | No | No |
+| GRU | ML | Discrete | Yes | No |
+| LSTM | ML | Discrete | Yes | No |
+| TCN | ML | Discrete | No | No |
+| Mamba | ML | Discrete | Yes | No |
+| Neural ODE | Neural CT | Continuous | Yes | No |
+| Neural SDE | Neural CT | Continuous | Yes | No |
+| Neural CDE | Neural CT | Continuous | Yes | No |
+| Hybrid Linear Beam | Hybrid | Continuous | Yes | Yes |
+| Hybrid Nonlinear Cam | Hybrid | Continuous | Yes | Yes |
+| UDE | Hybrid | Continuous | Yes | Yes |
+
+## Additional Exported Models
+
+In addition to the 15 core models, the package also exports:
+
+- Physics ODE wrappers: `LinearPhysics`, `StribeckPhysics`
+- 2D black-box NODE variants: `VanillaNODE2D`, `StructuredNODE`, `AdaptiveNODE`
+- 2D black-box NCDE variants: `VanillaNCDE2D`, `StructuredNCDE`, `AdaptiveNCDE`
+- 2D black-box NSDE variants: `VanillaNSDE2D`, `StructuredNSDE`, `AdaptiveNSDE`
+
+These models follow the same `fit / predict_osa / predict_free_run` pattern.
+
+## Quick Start
+
+### 1) Load and split one dataset
+
+```python
+from src import Dataset
+
+ds = Dataset.from_bab_experiment("multisine_05", preprocess=True, resample_factor=50)
+train_ds, test_ds = ds.split(0.8)
+```
+
+### 2) Fit one model and evaluate OSA/FR
+
+```python
+from src import UDE
+
+dt = 1.0 / ds.sampling_rate
+model = UDE(
+    sampling_time=dt,
+    hidden_layers=[64, 64],
+    learning_rate=1e-3,
+    epochs=500,
+    sequence_length=50,
+    training_mode="subsequence",
+)
+
+model.fit(train_ds.u, train_ds.y, verbose=True)
+
+y_osa = model.predict_osa(test_ds.u, test_ds.y)
+y_fr = model.predict_free_run(test_ds.u, test_ds.y[: model.max_lag])
+```
+
+### 3) Run benchmark
+
+Default benchmark:
+
+```bash
+python3 examples/benchmark.py
+```
+
+Custom benchmark:
+
+```bash
+python3 examples/benchmark.py \
+  --datasets multisine_05,multisine_06 \
+  --models narx,random_forest,neural_network,gru,lstm,tcn,mamba,neural_ode,neural_sde,neural_cde,linear_physics,stribeck_physics,ude \
+  --resample-factor 50 \
+  --train-ratio 0.8 \
+  --output-json results/benchmark.json
+```
+
+Disable Weights and Biases logging:
+
+```bash
+python3 examples/benchmark.py --disable-wandb
+```
+
+## Weights and Biases Logging
+
+When supported by a model, `fit(..., wandb_run=..., wandb_log_every=...)` logs:
+
+- training loss
+- gradient norm
+- model-specific scalar diagnostics
+
+## Repository Layout
+
+```text
+hybrid-modeling/
+├── src/
+│   ├── data/             # Dataset loaders and preprocessing
+│   ├── models/           # Classical, ML, CT, and hybrid models
+│   ├── benchmarking/     # Benchmark runner and case presets
+│   ├── validation/       # Metrics
+│   └── visualization/    # Plot helpers
+├── examples/             # End-to-end scripts
+├── docs/                 # Extra documentation
+└── full_comparison.ipynb # Full comparison notebook
+```
+
+## Documentation
+
+- `docs/benchmarking.md`
+- `docs/hybrid_models.md`
+- `docs/neural_cde.md`
+- `docs/README.md`
