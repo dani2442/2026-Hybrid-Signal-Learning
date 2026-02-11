@@ -34,6 +34,44 @@ def _restore_module(name: str, previous):
 
 def _import_random_forest_regressor():
     """Import sklearn RandomForestRegressor with a pandas-free fallback."""
+    def _safe_import(root_exc: BaseException | None = None):
+        # Force sklearn to treat pandas/pyarrow as unavailable so optional
+        # imports do not crash on ABI-mismatched wheels.
+        previous_pandas = sys.modules.get("pandas", _MISSING)
+        previous_pyarrow = sys.modules.get("pyarrow", _MISSING)
+        for modname in list(sys.modules):
+            if modname == "sklearn" or modname.startswith("sklearn."):
+                del sys.modules[modname]
+
+        sys.modules["pandas"] = None
+        sys.modules["pyarrow"] = None
+        try:
+            ensemble = importlib.import_module("sklearn.ensemble")
+            return (
+                ensemble.RandomForestRegressor,
+                "Warning: loaded scikit-learn without pandas/pyarrow due to NumPy ABI mismatch.",
+            )
+        except Exception as exc:
+            if is_binary_incompatibility_error(exc):
+                if root_exc is None:
+                    root_exc = exc
+                raise RuntimeError(_binary_incompatibility_message()) from root_exc
+            raise RuntimeError(
+                "Failed to import scikit-learn RandomForestRegressor."
+            ) from exc
+        finally:
+            _restore_module("pandas", previous_pandas)
+            _restore_module("pyarrow", previous_pyarrow)
+
+    # With NumPy>=2 environments, prefer the safe import path directly to
+    # avoid optional pandas/pyarrow ABI crashes during sklearn import.
+    try:
+        numpy_major = int(str(np.__version__).split(".", maxsplit=1)[0])
+    except Exception:
+        numpy_major = 0
+    if numpy_major >= 2:
+        return _safe_import()
+
     try:
         # NumPy may dump ABI traceback to stderr before raising; keep notebook output clean.
         with contextlib.redirect_stderr(io.StringIO()):
@@ -51,31 +89,7 @@ def _import_random_forest_regressor():
             raise
         root_exc = exc
 
-    # Fallback: force sklearn to treat pandas/pyarrow as unavailable so
-    # optional imports do not crash on ABI-mismatched wheels.
-    previous_pandas = sys.modules.get("pandas", _MISSING)
-    previous_pyarrow = sys.modules.get("pyarrow", _MISSING)
-    for modname in list(sys.modules):
-        if modname == "sklearn" or modname.startswith("sklearn."):
-            del sys.modules[modname]
-
-    sys.modules["pandas"] = None
-    sys.modules["pyarrow"] = None
-    try:
-        ensemble = importlib.import_module("sklearn.ensemble")
-        return (
-            ensemble.RandomForestRegressor,
-            "Warning: loaded scikit-learn without pandas/pyarrow due to NumPy ABI mismatch.",
-        )
-    except Exception as exc:
-        if is_binary_incompatibility_error(exc):
-            raise RuntimeError(_binary_incompatibility_message()) from root_exc
-        raise RuntimeError(
-            "Failed to import scikit-learn RandomForestRegressor."
-        ) from exc
-    finally:
-        _restore_module("pandas", previous_pandas)
-        _restore_module("pyarrow", previous_pyarrow)
+    return _safe_import(root_exc=root_exc)
 
 
 class RandomForest(BaseModel):
