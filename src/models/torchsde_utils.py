@@ -15,6 +15,44 @@ def inverse_softplus(x: float, minimum: float = 1e-8) -> float:
     return float(np.log(np.expm1(x)))
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Control interpolation helpers
+# ─────────────────────────────────────────────────────────────────────
+
+def interp_u(model, t, x, *, return_du: bool = False):
+    """Linear-interpolate u(t) from stored ``(t_series, u_series)``.
+
+    Works with both single-trajectory and batch-mode (``batch_start_times``).
+    When *return_du* is ``True``, also returns the time-derivative du/dt
+    (used by CDE-inspired models).
+
+    Expects *model* to have attributes:
+      - ``t_series``: 1-D time grid
+      - ``u_series``: control input tensor aligned with ``t_series``
+      - ``batch_start_times``: ``None`` or ``[B, 1]`` tensor of offsets
+    """
+    import torch
+
+    if model.batch_start_times is not None:
+        t_abs = model.batch_start_times + t
+    else:
+        t_abs = t * torch.ones_like(x[:, 0:1])
+
+    k_idx = torch.searchsorted(model.t_series, t_abs.reshape(-1), right=True)
+    k_idx = torch.clamp(k_idx, 1, len(model.t_series) - 1)
+    t1 = model.t_series[k_idx - 1].unsqueeze(1)
+    t2 = model.t_series[k_idx].unsqueeze(1)
+    u1, u2 = model.u_series[k_idx - 1], model.u_series[k_idx]
+    denom = (t2 - t1).clone()
+    denom[denom < 1e-6] = 1.0
+    alpha = (t_abs - t1) / denom
+    u_t = u1 + alpha * (u2 - u1)
+
+    if return_du:
+        return u_t, (u2 - u1) / denom
+    return u_t
+
+
 class ControlledPathMixin:
     """Mixin implementing piecewise-constant control interpolation."""
 
@@ -279,8 +317,8 @@ def train_sequence_batches(
     dtype,
     verbose: bool,
     progress_desc: str,
-    wandb_run=None,
-    wandb_log_every: int = 1,
+    logger=None,
+    log_every: int = 1,
     sequences_per_epoch: int | None = None,
     early_stopping_patience: int | None = None,
     early_stopping_min_delta: float = 0.0,
@@ -376,8 +414,8 @@ def train_sequence_batches(
 
         if verbose and hasattr(epoch_iter, "set_postfix"):
             epoch_iter.set_postfix(loss=avg_loss)
-        if wandb_run is not None and wandb_log_every > 0 and (epoch + 1) % wandb_log_every == 0:
-            wandb_run.log(
+        if logger is not None and log_every > 0 and (epoch + 1) % log_every == 0:
+            logger.log_metrics(
                 {
                     "train/epoch": epoch + 1,
                     "train/loss": avg_loss,

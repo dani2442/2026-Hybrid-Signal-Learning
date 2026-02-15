@@ -24,30 +24,30 @@ Build a reproducible leaderboard across model families with identical data handl
 - `BenchmarkRunner`: benchmark execution + JSON export
 - `summarize_results(...)`: leaderboard sorting helper
 
-## CLI Example
+## Programmatic Usage
 
-```bash
-python3 examples/benchmark.py \
-  --datasets multisine_05,multisine_06 \
-  --models narx,random_forest,neural_ode,neural_sde,hybrid_linear_beam,hybrid_nonlinear_cam \
-  --resample-factor 50 \
-  --train-ratio 0.8 \
-  --output-json results/benchmark.json
+```python
+from src import BenchmarkConfig, BenchmarkRunner, build_benchmark_cases
+
+cfg = BenchmarkConfig(
+    datasets=["multisine_05", "multisine_06"],
+    train_ratio=0.8,
+    resample_factor=50,
+    output_json="results/benchmark.json",
+)
+cases = build_benchmark_cases(cfg)
+runner = BenchmarkRunner(cfg)
+results = runner.run(cases)
 ```
 
 ## W&B Logging
 
-By default, `examples/benchmark.py` initializes a W&B run and logs:
+Enable logging by setting `wandb_project` in the model configs passed
+to each benchmark case. Metrics logged per-run include:
 
 - dataset metadata (`dataset/*`)
 - per-run metrics (`benchmark/*`)
 - full tabular artifact (`benchmark/results_table`)
-
-Disable logging with:
-
-```bash
-python3 examples/benchmark.py --disable-wandb
-```
 
 ## Scaling Strategy
 

@@ -56,55 +56,56 @@ The CDE couples input through $\mathrm{d}X$ rather than concatenating $u$ into t
 
 ## Installation
 
-```bash
-pip install torchcde
-```
+`torchcde` is included in the project dependencies. No extra install needed
+when using `uv sync` or `pip install -e .`.
 
 ## API
 
 ```python
-NeuralCDE(
+from src import NeuralCDE
+from src.config import NeuralCDEConfig
+
+cfg = NeuralCDEConfig(
     hidden_dim=32,          # latent state dimension
     input_dim=2,            # non-time input channels
     hidden_layers=[64, 64], # vector-field MLP widths
     interpolation="cubic",  # "cubic" | "linear"
-    solver="dopri5",        # "dopri5" | "rk4" | "euler" | "midpoint"
+    solver="rk4",           # "rk4" | "euler" | "midpoint"
     learning_rate=1e-3,
     epochs=100,
-    rtol=1e-4,              # adaptive solver only
+    rtol=1e-4,              # adaptive solver tolerance
     atol=1e-5,
 )
+model = NeuralCDE(cfg)
 ```
 
 | Method | Description |
 |--------|-------------|
-| `fit(u, y)` | Train on input–output data |
-| `predict_osa(u, y)` | One-step-ahead prediction |
-| `predict_free_run(u, y_initial)` | Autonomous simulation |
-| `predict(u, y, mode="OSA"\|"FR")` | Unified interface |
+| `fit(train_data, val_data)` | Train on `(u, y)` tuple |
+| `predict(u, y, mode="OSA"\|"FR")` | Unified prediction interface |
+| `save(path)` / `load(path)` | Checkpoint persistence |
 
 ## Quick Start
 
 ```python
 from src import Dataset, NeuralCDE
+from src.config import NeuralCDEConfig
 
 dataset = Dataset.from_bab_experiment("multisine_05", preprocess=True, resample_factor=50)
 train, test = dataset.split(0.8)
 
-model = NeuralCDE(hidden_dim=32, hidden_layers=[64, 64], solver="dopri5", epochs=100)
-model.fit(train.u, train.y)
+cfg = NeuralCDEConfig(hidden_dim=32, hidden_layers=[64, 64], epochs=100)
+model = NeuralCDE(cfg)
+model.fit(train.arrays)
 
-y_osa = model.predict_osa(test.u, test.y)
-y_fr  = model.predict_free_run(test.u, test.y[:1])
+y_osa = model.predict(test.u, test.y, mode="OSA")
+y_fr  = model.predict(test.u, test.y, mode="FR")
 ```
 
 ## Benchmarking
 
-```bash
-python3 examples/benchmark.py \
-  --datasets multisine_05 \
-  --models neural_ode,neural_sde,neural_cde
-```
+See the [benchmarking guide](benchmarking.md) for running reproducible
+comparisons across model families.
 
 ## Troubleshooting
 

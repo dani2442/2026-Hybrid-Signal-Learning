@@ -1,590 +1,474 @@
-"""Black-box Neural ODE models with 2-D state [θ, θ̇].
+"""Black-box Neural ODE / SDE models with 2-D state [θ, θ̇].
 
-Three architectures sharing the same training / prediction wrapper:
+Nine architectures sharing one training / prediction base:
 
-VanillaNODE2D
-    Fully black-box: NN learns both dθ/dt and dθ̇/dt simultaneously.
+ODE (zero diffusion)            SDE (learned diffusion)
+─────────────────               ────────────────────────
+VanillaNODE2D                   VanillaNSDE2D
+StructuredNODE                  StructuredNSDE
+AdaptiveNODE                    AdaptiveNSDE
 
-StructuredNODE
-    Kinematic constraint: dθ/dt = θ̇ is hardcoded.
-    NN only learns the acceleration dθ̇/dt = f_NN(θ, θ̇, u).
+CDE-inspired variants are registered by ``blackbox_cde.py``.
 
-AdaptiveNODE
-    Like StructuredNODE but with an additional near-zero-initialized
-    residual NN that can correct the base acceleration.
-
-All use SELU / AlphaDropout, multiple-shooting training (random
-K-step windows, batch of initial conditions), and torchdiffeq RK4.
+All use SELU / AlphaDropout, multiple-shooting training, torchsde Euler.
 """
 
 from __future__ import annotations
 
+from typing import Any, Dict
+
 import numpy as np
 
-from .base import BaseModel
+from .base import BaseModel, resolve_device, SHOOTING_GRAD_CLIP
+from .torchsde_utils import interp_u
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  u-interpolation mixin  (avoids copy-paste across ODE funcs)
+#  Shared network builders
 # ═══════════════════════════════════════════════════════════════════════
 
-def _interp_u(model, t, x):
-    """Linear-interpolate u at time *t*, supporting batch_start_times."""
-    import torch
+def _selu_block(in_dim: int, hidden_dim: int, out_dim: int):
+    """4-layer SELU + AlphaDropout network used across all blackbox dynamics."""
+    import torch.nn as nn
+    return nn.Sequential(
+        nn.Linear(in_dim, hidden_dim), nn.SELU(), nn.AlphaDropout(0.05),
+        nn.Linear(hidden_dim, hidden_dim), nn.SELU(), nn.AlphaDropout(0.05),
+        nn.Linear(hidden_dim, hidden_dim // 2), nn.SELU(),
+        nn.Linear(hidden_dim // 2, out_dim),
+    )
 
-    if model.batch_start_times is not None:
-        t_abs = model.batch_start_times + t
-    else:
-        t_abs = t * torch.ones_like(x[:, 0:1])
 
-    k_idx = torch.searchsorted(model.t_series, t_abs.reshape(-1), right=True)
-    k_idx = torch.clamp(k_idx, 1, len(model.t_series) - 1)
-    t1 = model.t_series[k_idx - 1].unsqueeze(1)
-    t2 = model.t_series[k_idx].unsqueeze(1)
-    u1, u2 = model.u_series[k_idx - 1], model.u_series[k_idx]
-    denom = (t2 - t1).clone()
-    denom[denom < 1e-6] = 1.0
-    alpha = (t_abs - t1) / denom
-    return u1 + alpha * (u2 - u1)
+def _tanh_block(in_dim: int, hidden_dim: int, out_dim: int):
+    """Small Tanh network for diffusion / residual branches."""
+    import torch.nn as nn
+    return nn.Sequential(
+        nn.Linear(in_dim, hidden_dim // 2), nn.Tanh(),
+        nn.Linear(hidden_dim // 2, out_dim),
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  ODE right-hand sides  (nn.Module for torchdiffeq)
+#  Dynamics right-hand sides  (nn.Module for torchsde f/g interface)
 # ═══════════════════════════════════════════════════════════════════════
+
+# -- ODE variants (zero diffusion) ------------------------------------
 
 def _build_vanilla(hidden_dim: int = 128):
-    """Vanilla NODE: NN → [dθ, dω].  No kinematic prior."""
-    import torch
-    import torch.nn as nn
+    """Fully black-box: NN → [dθ, dθ̇]."""
+    import torch, torch.nn as nn
 
-    class _VanillaFunc(nn.Module):
+    class _Func(nn.Module):
+        noise_type = "diagonal"; sde_type = "ito"
         def __init__(self):
             super().__init__()
-            self.net = nn.Sequential(
-                nn.Linear(3, hidden_dim),
-                nn.SELU(),
-                nn.AlphaDropout(0.05),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.SELU(),
-                nn.AlphaDropout(0.05),
-                nn.Linear(hidden_dim, hidden_dim // 2),
-                nn.SELU(),
-                nn.Linear(hidden_dim // 2, 2),
-            )
-            self.u_series = None
-            self.t_series = None
-            self.batch_start_times = None
-
-        def forward(self, t, x):
-            u_t = _interp_u(self, t, x)
+            self.net = _selu_block(3, hidden_dim, 2)
+            self.u_series = self.t_series = self.batch_start_times = None
+        def f(self, t, x):
+            u_t = interp_u(self, t, x)
             return self.net(torch.cat([x, u_t], dim=1))
+        def g(self, t, x):
+            return torch.zeros_like(x)
 
-    return _VanillaFunc()
+    return _Func()
 
 
 def _build_structured(hidden_dim: int = 128):
-    """Structured NODE: dθ/dt = θ̇ (hardcoded), NN → dθ̇/dt."""
-    import torch
-    import torch.nn as nn
+    """Kinematic constraint dθ/dt = θ̇, NN → dθ̇/dt."""
+    import torch, torch.nn as nn
 
-    class _StructuredFunc(nn.Module):
+    class _Func(nn.Module):
+        noise_type = "diagonal"; sde_type = "ito"
         def __init__(self):
             super().__init__()
-            self.net = nn.Sequential(
-                nn.Linear(3, hidden_dim),
-                nn.SELU(),
-                nn.AlphaDropout(0.05),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.SELU(),
-                nn.AlphaDropout(0.05),
-                nn.Linear(hidden_dim, hidden_dim // 2),
-                nn.SELU(),
-                nn.Linear(hidden_dim // 2, 1),
-            )
-            self.u_series = None
-            self.t_series = None
-            self.batch_start_times = None
-
-        def forward(self, t, x):
-            u_t = _interp_u(self, t, x)
-            th, thd = x[:, 0:1], x[:, 1:2]
-            thdd = self.net(torch.cat([th, thd, u_t], dim=1))
+            self.net = _selu_block(3, hidden_dim, 1)
+            self.u_series = self.t_series = self.batch_start_times = None
+        def f(self, t, x):
+            u_t = interp_u(self, t, x)
+            thd = x[:, 1:2]
+            thdd = self.net(torch.cat([x, u_t], dim=1))
             return torch.cat([thd, thdd], dim=1)
+        def g(self, t, x):
+            return torch.zeros_like(x)
 
-    return _StructuredFunc()
+    return _Func()
 
 
 def _build_adaptive(hidden_dim: int = 128):
-    """Adaptive NODE: structured base + near-zero residual correction."""
-    import torch
-    import torch.nn as nn
+    """Structured base + near-zero residual correction."""
+    import torch, torch.nn as nn
 
-    class _AdaptiveFunc(nn.Module):
+    class _Func(nn.Module):
+        noise_type = "diagonal"; sde_type = "ito"
         def __init__(self):
             super().__init__()
-            self.dynamics_net = nn.Sequential(
-                nn.Linear(3, hidden_dim),
-                nn.SELU(),
-                nn.AlphaDropout(0.05),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.SELU(),
-                nn.AlphaDropout(0.05),
-                nn.Linear(hidden_dim, hidden_dim // 2),
-                nn.SELU(),
-                nn.Linear(hidden_dim // 2, 1),
-            )
-            self.adaptive_residual = nn.Sequential(
-                nn.Linear(3, hidden_dim // 2),
-                nn.Tanh(),
-                nn.Linear(hidden_dim // 2, 1),
-            )
-            # Initialise residual near zero
+            self.dynamics_net = _selu_block(3, hidden_dim, 1)
+            self.adaptive_residual = _tanh_block(3, hidden_dim, 1)
             with torch.no_grad():
                 self.adaptive_residual[-1].weight.mul_(0.01)
                 self.adaptive_residual[-1].bias.zero_()
-
-            self.u_series = None
-            self.t_series = None
-            self.batch_start_times = None
-
-        def forward(self, t, x):
-            u_t = _interp_u(self, t, x)
-            th, thd = x[:, 0:1], x[:, 1:2]
-            inp = torch.cat([th, thd, u_t], dim=1)
+            self.u_series = self.t_series = self.batch_start_times = None
+        def f(self, t, x):
+            u_t = interp_u(self, t, x)
+            thd = x[:, 1:2]
+            inp = torch.cat([x, u_t], dim=1)
             thdd = self.dynamics_net(inp) + self.adaptive_residual(inp)
             return torch.cat([thd, thdd], dim=1)
+        def g(self, t, x):
+            return torch.zeros_like(x)
 
-    return _AdaptiveFunc()
+    return _Func()
+
+
+# -- SDE variants (learned diffusion) ---------------------------------
+
+def _build_vanilla_nsde(hidden_dim: int = 128):
+    """Fully black-box drift + learned diagonal diffusion."""
+    import torch, torch.nn as nn
+
+    class _Func(nn.Module):
+        noise_type = "diagonal"; sde_type = "ito"
+        def __init__(self):
+            super().__init__()
+            self.drift_net = _selu_block(3, hidden_dim, 2)
+            self.diff_net = _tanh_block(3, hidden_dim, 2)
+            self.u_series = self.t_series = self.batch_start_times = None
+        def f(self, t, x):
+            u_t = interp_u(self, t, x)
+            return self.drift_net(torch.cat([x, u_t], dim=1))
+        def g(self, t, x):
+            import torch.nn.functional as F
+            u_t = interp_u(self, t, x)
+            return F.softplus(self.diff_net(torch.cat([x, u_t], dim=1))) + 1e-6
+
+    return _Func()
+
+
+def _build_structured_nsde(hidden_dim: int = 128):
+    """Structured drift (dθ=ω) + diffusion on acceleration only."""
+    import torch, torch.nn as nn
+
+    class _Func(nn.Module):
+        noise_type = "diagonal"; sde_type = "ito"
+        def __init__(self):
+            super().__init__()
+            self.acc_net = _selu_block(3, hidden_dim, 1)
+            self.diff_net = _tanh_block(3, hidden_dim, 1)
+            self.u_series = self.t_series = self.batch_start_times = None
+        def f(self, t, x):
+            u_t = interp_u(self, t, x)
+            theta, omega = x[:, 0:1], x[:, 1:2]
+            acc = self.acc_net(torch.cat([theta, omega, u_t], dim=1))
+            return torch.cat([omega, acc], dim=1)
+        def g(self, t, x):
+            import torch.nn.functional as F
+            u_t = interp_u(self, t, x)
+            theta, omega = x[:, 0:1], x[:, 1:2]
+            sigma = F.softplus(self.diff_net(torch.cat([theta, omega, u_t], dim=1))) + 1e-6
+            return torch.cat([torch.zeros_like(sigma), sigma], dim=1)
+
+    return _Func()
+
+
+def _build_adaptive_nsde(hidden_dim: int = 128):
+    """Adaptive drift (structured + residual) + learned diffusion."""
+    import torch, torch.nn as nn
+
+    class _Func(nn.Module):
+        noise_type = "diagonal"; sde_type = "ito"
+        def __init__(self):
+            super().__init__()
+            self.base_net = _selu_block(3, hidden_dim, 1)
+            self.residual_net = _tanh_block(3, hidden_dim, 1)
+            self.diff_net = _tanh_block(3, hidden_dim, 1)
+            with torch.no_grad():
+                self.residual_net[-1].weight.mul_(0.01)
+                self.residual_net[-1].bias.zero_()
+            self.u_series = self.t_series = self.batch_start_times = None
+        def f(self, t, x):
+            u_t = interp_u(self, t, x)
+            theta, omega = x[:, 0:1], x[:, 1:2]
+            inp = torch.cat([theta, omega, u_t], dim=1)
+            return torch.cat([omega, self.base_net(inp) + self.residual_net(inp)], dim=1)
+        def g(self, t, x):
+            import torch.nn.functional as F
+            u_t = interp_u(self, t, x)
+            theta, omega = x[:, 0:1], x[:, 1:2]
+            sigma = F.softplus(self.diff_net(torch.cat([theta, omega, u_t], dim=1))) + 1e-6
+            return torch.cat([torch.zeros_like(sigma), sigma], dim=1)
+
+    return _Func()
+
+
+# Factory name → builder function
+_FACTORIES: Dict[str, Any] = {
+    "vanilla": _build_vanilla,
+    "structured": _build_structured,
+    "adaptive": _build_adaptive,
+    "vanilla_nsde": _build_vanilla_nsde,
+    "structured_nsde": _build_structured_nsde,
+    "adaptive_nsde": _build_adaptive_nsde,
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Shared training / prediction wrapper for 2-D state ODE models
+#  Shared wrapper
 # ═══════════════════════════════════════════════════════════════════════
 
 class _BlackboxODE2D(BaseModel):
-    """Shared wrapper for black-box 2-D state ODE models.
+    """Shared base for all black-box 2-D state models (ODE, SDE, CDE).
 
-    State x = [θ, θ̇].
-    ``fit()`` accepts 1-D y (position only, velocity is estimated
-    via central differences) **or** 2-D y_sim = [θ, θ̇].
-    Training uses multiple-shooting: a batch of B random windows of
-    K steps each, sampled uniformly across the signal.
-    Loss covers both position and velocity.
+    Sub-classes only need to set ``_factory_name`` and, if they use a
+    different config dataclass, override ``_make_default_config``.
     """
 
-    _VALID_SOLVERS = {"euler", "rk4", "dopri5"}
+    _factory_name: str = "vanilla"
 
-    def __init__(
-        self,
-        ode_factory,
-        hidden_dim: int = 128,
-        dt: float = 0.05,
-        solver: str = "rk4",
-        learning_rate: float = 1e-2,
-        epochs: int = 5000,
-        k_steps: int = 20,
-        batch_size: int = 128,
-        training_mode: str = "shooting",
-    ):
-        super().__init__(nu=1, ny=2)
-        self.ode_factory = ode_factory
-        self.hidden_dim = int(hidden_dim)
-        self.dt = float(dt)
-        self.solver = solver
-        self.learning_rate = float(learning_rate)
-        self.epochs = int(epochs)
-        self.k_steps = int(k_steps)
-        self.batch_size = int(batch_size)
-        self.training_mode = training_mode
-
-        self.ode_func_ = None
+    def __init__(self, config=None):
+        if config is None:
+            config = self._make_default_config()
+        super().__init__(config)
+        self.func_ = None
         self._device = None
         self._dtype = None
-        self.training_loss_: list[float] = []
 
-        if self.solver not in self._VALID_SOLVERS:
-            raise ValueError(
-                f"Unknown solver: {solver}. Use: {sorted(self._VALID_SOLVERS)}"
-            )
+    @staticmethod
+    def _make_default_config():
+        from ..config import BlackboxODE2DConfig
+        return BlackboxODE2DConfig()
 
     # ── helpers ───────────────────────────────────────────────────────
 
     @staticmethod
-    def _compute_velocity(y: np.ndarray, dt: float) -> np.ndarray:
-        """Central-difference velocity estimate."""
+    def _compute_velocity(y, dt):
         return np.gradient(y, dt)
 
-    def _simulate(self, u_t, x0, t_grid):
-        """Integrate ODE from x0 along t_grid."""
-        from torchdiffeq import odeint
-
-        self.ode_func_.t_series = t_grid
-        self.ode_func_.u_series = u_t
-        self.ode_func_.batch_start_times = None
-
+    def _simulate(self, u_t, x0, t_grid, batch_start_times=None):
+        """Integrate dynamics using torchsde (SDE or zero-noise ODE)."""
+        import torchsde
+        self.func_.u_series = u_t
+        self.func_.t_series = t_grid
+        self.func_.batch_start_times = batch_start_times
         x0_batch = x0 if x0.ndim == 2 else x0.unsqueeze(0)
-        kw = {"method": self.solver}
-        if self.solver in ("euler", "rk4"):
-            kw["options"] = {"step_size": self.dt}
-        else:
-            kw["rtol"] = 1e-3
-            kw["atol"] = 1e-3
-
-        return odeint(self.ode_func_, x0_batch, t_grid, **kw)  # (T, B, 2)
-
-    def _simulate_batch(self, u_t, x0_batch, t_grid, batch_start_times):
-        """Integrate ODE for a batch of initial conditions (shooting)."""
-        from torchdiffeq import odeint
-
-        self.ode_func_.t_series = t_grid
-        self.ode_func_.u_series = u_t
-        self.ode_func_.batch_start_times = batch_start_times
-
-        kw = {"method": self.solver}
-        if self.solver in ("euler", "rk4"):
-            kw["options"] = {"step_size": self.dt}
-        else:
-            kw["rtol"] = 1e-3
-            kw["atol"] = 1e-3
-
-        return odeint(self.ode_func_, x0_batch, t_grid, **kw)  # (K, B, 2)
-
-    # ── multiple-shooting training ────────────────────────────────────
-
-    def _train_shooting(self, u, y_sim, verbose, wandb_run=None, wandb_log_every=1):
-        """Multiple-shooting training on random K-step windows."""
-        import torch
-        import torch.optim as optim
-        from tqdm.auto import tqdm
-
-        u_t = torch.tensor(u.reshape(-1, 1), dtype=self._dtype, device=self._device)
-        y_t = torch.tensor(y_sim, dtype=self._dtype, device=self._device)  # (N, 2)
-        t_full = torch.arange(len(y_t), dtype=self._dtype, device=self._device) * self.dt
-
-        K = min(self.k_steps, len(y_t) - 1)
-        B = self.batch_size
-        dt_local = self.dt
-        t_eval = torch.arange(K, dtype=self._dtype, device=self._device) * dt_local
-
-        params = list(self.ode_func_.parameters())
-        optimizer = optim.Adam(params, lr=self.learning_rate)
-
-        loss_history: list[float] = []
-        epoch_iter = range(self.epochs)
-        if verbose:
-            epoch_iter = tqdm(
-                epoch_iter,
-                desc=f"Training {self.__class__.__name__}",
-                unit="epoch",
-            )
-
-        for epoch in epoch_iter:
-            self.ode_func_.train()
-            optimizer.zero_grad()
-
-            # Random batch of starting indices
-            max_start = len(y_t) - K
-            start_idx = np.random.randint(0, max(1, max_start), size=B)
-            x0 = y_t[start_idx]  # (B, 2)
-            batch_start_times = t_full[start_idx].reshape(-1, 1)  # (B, 1)
-
-            pred = self._simulate_batch(u_t, x0, t_eval, batch_start_times)
-            # pred: (K, B, 2)
-
-            # Targets: (K, B, 2)
-            targets = torch.stack(
-                [y_t[i : i + K] for i in start_idx], dim=1,
-            )
-            loss = torch.mean((pred - targets) ** 2)
-
-            if torch.isnan(loss) or torch.isinf(loss):
-                loss_history.append(float("nan"))
-                if verbose and hasattr(epoch_iter, "set_postfix"):
-                    epoch_iter.set_postfix(loss="nan")
-                continue
-
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(params, max_norm=10.0)
-            optimizer.step()
-
-            lv = loss.item()
-            loss_history.append(lv)
-
-            if verbose and hasattr(epoch_iter, "set_postfix"):
-                epoch_iter.set_postfix(loss=f"{lv:.6f}")
-            if wandb_run and (epoch + 1) % wandb_log_every == 0:
-                wandb_run.log({"train/loss": lv, "train/epoch": epoch + 1})
-
-        return loss_history
-
-    # ── multi-dataset training ────────────────────────────────────────
-
-    def fit_multi(
-        self,
-        datasets: list[dict],
-        verbose: bool = True,
-        wandb_run=None,
-        wandb_log_every: int = 1,
-    ) -> "_BlackboxODE2D":
-        """Train on multiple datasets simultaneously.
-
-        Parameters
-        ----------
-        datasets : list of dict
-            Each dict has keys ``"t"``, ``"u"``, ``"y"`` as torch tensors
-            already on the correct device, and ``"name"`` (str).
-        """
-        import torch
-        import torch.optim as optim
-        from tqdm.auto import tqdm
-
-        # Auto-initialise if not already done (e.g. called without fit())
-        if self._device is None:
-            self._device = torch.device(
-                "cuda" if torch.cuda.is_available() else "cpu"
-            )
-            self._dtype = torch.float32
-        if self.ode_func_ is None:
-            self.ode_func_ = self.ode_factory(self.hidden_dim).to(self._device)
-
-        K = self.k_steps
-        B = self.batch_size
-
-        params = list(self.ode_func_.parameters())
-        optimizer = optim.Adam(params, lr=self.learning_rate)
-
-        loss_history: list[float] = []
-        epoch_iter = range(self.epochs)
-        if verbose:
-            epoch_iter = tqdm(
-                epoch_iter,
-                desc=f"Training {self.__class__.__name__}",
-                unit="epoch",
-            )
-
-        for epoch in epoch_iter:
-            self.ode_func_.train()
-            optimizer.zero_grad()
-
-            # Pick a random dataset
-            ds = datasets[np.random.randint(len(datasets))]
-            t_ds, u_ds, y_ds = ds["t"], ds["u"], ds["y"]
-            dt_local = (t_ds[1] - t_ds[0]).item()
-            t_eval = torch.arange(K, dtype=self._dtype, device=self._device) * dt_local
-
-            self.ode_func_.u_series = u_ds
-            self.ode_func_.t_series = t_ds
-
-            max_start = len(t_ds) - K
-            start_idx = np.random.randint(0, max(1, max_start), size=B)
-            x0 = y_ds[start_idx]
-            self.ode_func_.batch_start_times = t_ds[start_idx].reshape(-1, 1)
-
-            pred = odeint_call(self.ode_func_, x0, t_eval, self.solver, self.dt)
-            targets = torch.stack([y_ds[i : i + K] for i in start_idx], dim=1)
-            loss = torch.mean((pred - targets) ** 2)
-
-            if torch.isnan(loss) or torch.isinf(loss):
-                loss_history.append(float("nan"))
-                continue
-
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(params, max_norm=10.0)
-            optimizer.step()
-
-            lv = loss.item()
-            loss_history.append(lv)
-            if verbose and hasattr(epoch_iter, "set_postfix"):
-                epoch_iter.set_postfix(loss=f"{lv:.6f}", ds=ds.get("name", ""))
-
-        self.training_loss_ = loss_history
-        self._is_fitted = True
-        return self
-
-    # ── fit / predict ─────────────────────────────────────────────────
-
-    def fit(
-        self,
-        u: np.ndarray,
-        y: np.ndarray,
-        verbose: bool = True,
-        wandb_run=None,
-        wandb_log_every: int = 1,
-    ) -> "_BlackboxODE2D":
-        import torch
-
-        u = np.asarray(u, dtype=float).flatten()
-        y = np.asarray(y, dtype=float)
-
-        # Accept 1D (position only) or 2D (position + velocity)
-        if y.ndim == 1 or (y.ndim == 2 and y.shape[1] == 1):
-            y_pos = y.flatten()
-            y_vel = self._compute_velocity(y_pos, self.dt)
-            y_sim = np.column_stack([y_pos, y_vel])
-        else:
-            y_sim = y  # already 2D
-
-        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._dtype = torch.float32
-        self.ode_func_ = self.ode_factory(self.hidden_dim).to(self._device)
-
-        self.training_loss_ = self._train_shooting(
-            u, y_sim, verbose, wandb_run, wandb_log_every,
+        return torchsde.sdeint(
+            self.func_, x0_batch, t_grid,
+            method="euler", dt=self.config.dt,
         )
-        self._is_fitted = True
-        return self
 
-    def predict_osa(self, u: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """One-step-ahead (returns position only for compatibility)."""
+    def _simulate_deterministic(self, u_t, x0, t_grid):
+        """Euler-integrate drift f() only — deterministic, no BM overhead."""
         import torch
+        self.func_.u_series = u_t
+        self.func_.t_series = t_grid
+        self.func_.batch_start_times = None
+        x0_batch = x0 if x0.ndim == 2 else x0.unsqueeze(0)
+        dt = self.config.dt
+        x = x0_batch.clone()
+        trajectory = [x]
+        for i in range(1, len(t_grid)):
+            dx = self.func_.f(t_grid[i - 1], x)
+            x = x + dx * dt
+            trajectory.append(x)
+        return torch.stack(trajectory, dim=0)
 
+    # ── training ──────────────────────────────────────────────────────
+
+    def _fit(self, u, y, *, val_data=None, logger=None):
+        import torch
+        c = self.config
         u = np.asarray(u, dtype=float).flatten()
         y = np.asarray(y, dtype=float)
+
         if y.ndim == 1 or (y.ndim == 2 and y.shape[1] == 1):
             y_pos = y.flatten()
-            y_vel = self._compute_velocity(y_pos, self.dt)
-            y_sim = np.column_stack([y_pos, y_vel])
+            y_sim = np.column_stack([y_pos, self._compute_velocity(y_pos, c.dt)])
         else:
             y_sim = y
 
-        predictions = []
-        self.ode_func_.eval()
+        self._device = resolve_device(c.device)
+        self._dtype = torch.float32
+
+        factory = _FACTORIES[self._factory_name]
+        self.func_ = factory(c.hidden_dim).to(self._device)
+        self.training_loss_ = self._train_shooting(u, y_sim, logger)
+
+    def _train_shooting(self, u, y_sim, logger):
+        import torch, torch.optim as optim
+        from tqdm.auto import tqdm
+        c = self.config
+
+        u_t = torch.tensor(u.reshape(-1, 1), dtype=self._dtype, device=self._device)
+        y_t = torch.tensor(y_sim, dtype=self._dtype, device=self._device)
+        t_full = torch.arange(len(y_t), dtype=self._dtype, device=self._device) * c.dt
+
+        K = min(c.k_steps, len(y_t) - 1)
+        B = c.batch_size
+        t_eval = torch.arange(K, dtype=self._dtype, device=self._device) * c.dt
+
+        params = list(self.func_.parameters())
+        optimizer = optim.Adam(params, lr=c.learning_rate)
+        history = []
+
+        it = range(c.epochs)
+        if c.verbose:
+            it = tqdm(it, desc=f"Training {self.__class__.__name__}", unit="epoch")
+
+        for epoch in it:
+            self.func_.train()
+            optimizer.zero_grad()
+
+            max_start = len(y_t) - K
+            start_idx = np.random.randint(0, max(1, max_start), size=B)
+            x0 = y_t[start_idx]
+            batch_start_times = t_full[start_idx].reshape(-1, 1)
+
+            pred = self._simulate(u_t, x0, t_eval, batch_start_times)
+            targets = torch.stack([y_t[i:i + K] for i in start_idx], dim=1)
+            loss = torch.mean((pred - targets) ** 2)
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                history.append(float("nan"))
+                continue
+
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(params, SHOOTING_GRAD_CLIP)
+            optimizer.step()
+
+            loss_val = loss.item()
+            history.append(loss_val)
+
+            if c.verbose and hasattr(it, "set_postfix"):
+                it.set_postfix(loss=f"{loss_val:.6f}")
+            if logger and c.wandb_log_every > 0 and (epoch + 1) % c.wandb_log_every == 0:
+                logger.log_metrics(
+                    {"train/loss": loss_val, "train/epoch": epoch + 1},
+                    step=epoch + 1,
+                )
+
+        return history
+
+    # ── predict ───────────────────────────────────────────────────────
+
+    def predict_osa(self, u, y):
+        import torch
+        c = self.config
+        u = np.asarray(u, dtype=float).flatten()
+        y = np.asarray(y, dtype=float)
+        if y.ndim == 1 or (y.ndim == 2 and y.shape[1] == 1):
+            y_pos = y.flatten()
+            y_sim = np.column_stack([y_pos, self._compute_velocity(y_pos, c.dt)])
+        else:
+            y_sim = y
+
+        preds = []
+        self.func_.eval()
         with torch.no_grad():
             for k in range(len(y_sim) - 1):
-                x0 = torch.tensor(
-                    y_sim[k : k + 1], dtype=self._dtype, device=self._device,
-                )
+                x0 = torch.tensor(y_sim[k:k+1], dtype=self._dtype, device=self._device)
                 u_seg = torch.tensor(
                     [[u[k]], [u[min(k + 1, len(u) - 1)]]],
                     dtype=self._dtype, device=self._device,
                 )
                 t_seg = torch.tensor(
-                    [k * self.dt, (k + 1) * self.dt],
+                    [k * c.dt, (k + 1) * c.dt],
                     dtype=self._dtype, device=self._device,
                 )
-                pred = self._simulate(u_seg, x0, t_seg)  # (2, 1, 2)
-                predictions.append(pred[-1, 0, 0].cpu().item())
+                pred = self._simulate_deterministic(u_seg, x0, t_seg)
+                preds.append(pred[-1, 0, 0].cpu().item())
+        return np.asarray(preds)
 
-        return np.asarray(predictions)
-
-    def predict_free_run(
-        self,
-        u: np.ndarray,
-        y_initial: np.ndarray,
-        return_2d: bool = False,
-        **kwargs,
-    ) -> np.ndarray:
-        """Free-run simulation.  By default returns position only."""
+    def predict_free_run(self, u, y_initial):
         import torch
-
+        c = self.config
         u = np.asarray(u, dtype=float).flatten()
         y_init = np.asarray(y_initial, dtype=float)
         if y_init.ndim == 1 or (y_init.ndim == 2 and y_init.shape[1] == 1):
             y_pos = y_init.flatten()
-            y_vel = self._compute_velocity(y_pos, self.dt)
-            x0_np = np.array([[y_pos[0], y_vel[0]]])
+            x0_np = np.array([[y_pos[0], self._compute_velocity(y_pos, c.dt)[0]]])
         else:
             x0_np = y_init[0:1]
 
-        self.ode_func_.eval()
+        self.func_.eval()
         with torch.no_grad():
-            u_t = torch.tensor(
-                u.reshape(-1, 1), dtype=self._dtype, device=self._device,
-            )
+            u_t = torch.tensor(u.reshape(-1, 1), dtype=self._dtype, device=self._device)
             x0 = torch.tensor(x0_np, dtype=self._dtype, device=self._device)
-            t_grid = torch.arange(
-                len(u), dtype=self._dtype, device=self._device,
-            ) * self.dt
-            pred = self._simulate(u_t, x0, t_grid)  # (T, 1, 2)
+            t_grid = torch.arange(len(u), dtype=self._dtype, device=self._device) * c.dt
+            pred = self._simulate_deterministic(u_t, x0, t_grid)
+        return pred[:, 0, 0].cpu().numpy()
 
-        result = pred[:, 0, :].cpu().numpy()  # (T, 2)
-        if return_2d:
-            return result
-        return result[:, 0]  # position only
+    # ── save / load ───────────────────────────────────────────────────
 
-    def simulate_full_2d(
-        self, u: np.ndarray, y_sim_init: np.ndarray,
-    ) -> np.ndarray:
-        """Full-trajectory simulation returning [θ, θ̇] (T×2)."""
-        return self.predict_free_run(u, y_sim_init, return_2d=True)
+    def _collect_state(self) -> Dict[str, Any]:
+        if self.func_ is None:
+            return {}
+        return {"func": self.func_.state_dict()}
 
+    def _restore_state(self, state):
+        # Accept legacy keys from older saved models
+        sd = state.get("func") or state.get("ode_func") or state.get("sde_func")
+        self.func_.load_state_dict(sd)
 
-# ═══════════════════════════════════════════════════════════════════════
-#  Helper for fit_multi (torchdiffeq call)
-# ═══════════════════════════════════════════════════════════════════════
+    def _build_for_load(self):
+        import torch
+        c = self.config
+        self._device = torch.device("cpu")
+        self._dtype = torch.float32
+        factory = _FACTORIES[self._factory_name]
+        self.func_ = factory(c.hidden_dim).to(self._device)
 
-def odeint_call(func, x0, t_eval, solver, dt):
-    from torchdiffeq import odeint
-    kw = {"method": solver}
-    if solver in ("euler", "rk4"):
-        kw["options"] = {"step_size": dt}
-    else:
-        kw["rtol"] = 1e-3
-        kw["atol"] = 1e-3
-    return odeint(func, x0, t_eval, **kw)
+    def __repr__(self):
+        c = self.config
+        return (f"{type(self).__name__}(hidden={c.hidden_dim}, "
+                f"K={c.k_steps}, epochs={c.epochs})")
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Public model classes
+#  Public ODE model classes
 # ═══════════════════════════════════════════════════════════════════════
 
 class VanillaNODE2D(_BlackboxODE2D):
-    """Vanilla Neural ODE with 2-D state.
-
-    Both derivatives are learned by the NN — no kinematic prior.
-    Input: [θ, θ̇, u]  →  Output: [dθ/dt, dθ̇/dt]
-    """
-    def __init__(self, hidden_dim=128, dt=0.05, solver="rk4",
-                 learning_rate=0.01, epochs=5000,
-                 k_steps=20, batch_size=128, training_mode="shooting"):
-        super().__init__(
-            ode_factory=_build_vanilla, hidden_dim=hidden_dim, dt=dt,
-            solver=solver, learning_rate=learning_rate, epochs=epochs,
-            k_steps=k_steps, batch_size=batch_size, training_mode=training_mode,
-        )
-
-    def __repr__(self):
-        return (f"VanillaNODE2D(hidden={self.hidden_dim}, K={self.k_steps}, "
-                f"B={self.batch_size}, epochs={self.epochs})")
+    """Vanilla Neural ODE with 2-D state. No kinematic prior."""
+    _factory_name = "vanilla"
 
 
 class StructuredNODE(_BlackboxODE2D):
-    """Structured Neural ODE with kinematic constraint.
-
-    dθ/dt = θ̇   (hardcoded)
-    dθ̇/dt = f_NN(θ, θ̇, u)
-    """
-    def __init__(self, hidden_dim=128, dt=0.05, solver="rk4",
-                 learning_rate=0.01, epochs=5000,
-                 k_steps=20, batch_size=128, training_mode="shooting"):
-        super().__init__(
-            ode_factory=_build_structured, hidden_dim=hidden_dim, dt=dt,
-            solver=solver, learning_rate=learning_rate, epochs=epochs,
-            k_steps=k_steps, batch_size=batch_size, training_mode=training_mode,
-        )
-
-    def __repr__(self):
-        return (f"StructuredNODE(hidden={self.hidden_dim}, K={self.k_steps}, "
-                f"B={self.batch_size}, epochs={self.epochs})")
+    """Structured NODE: dθ/dt=θ̇ hardcoded, NN → dθ̇/dt."""
+    _factory_name = "structured"
 
 
 class AdaptiveNODE(_BlackboxODE2D):
-    """Adaptive Neural ODE: structured base + near-zero residual.
+    """Adaptive NODE: structured base + near-zero residual correction."""
+    _factory_name = "adaptive"
 
-    dθ/dt = θ̇
-    dθ̇/dt = f_base(θ, θ̇, u) + f_residual(θ, θ̇, u)
 
-    Residual path initialised near zero so early training is stable.
-    """
-    def __init__(self, hidden_dim=128, dt=0.05, solver="rk4",
-                 learning_rate=0.005, epochs=5000,
-                 k_steps=20, batch_size=128, training_mode="shooting"):
-        super().__init__(
-            ode_factory=_build_adaptive, hidden_dim=hidden_dim, dt=dt,
-            solver=solver, learning_rate=learning_rate, epochs=epochs,
-            k_steps=k_steps, batch_size=batch_size, training_mode=training_mode,
-        )
+# ═══════════════════════════════════════════════════════════════════════
+#  Public SDE model classes
+# ═══════════════════════════════════════════════════════════════════════
 
-    def __repr__(self):
-        return (f"AdaptiveNODE(hidden={self.hidden_dim}, K={self.k_steps}, "
-                f"B={self.batch_size}, epochs={self.epochs})")
+class VanillaNSDE2D(_BlackboxODE2D):
+    """Vanilla 2-D Neural SDE."""
+    _factory_name = "vanilla_nsde"
+
+    @staticmethod
+    def _make_default_config():
+        from ..config import BlackboxSDE2DConfig
+        return BlackboxSDE2DConfig()
+
+
+class StructuredNSDE(_BlackboxODE2D):
+    """Structured 2-D NSDE: dθ=ω hardcoded, NN → dω + diffusion."""
+    _factory_name = "structured_nsde"
+
+    @staticmethod
+    def _make_default_config():
+        from ..config import BlackboxSDE2DConfig
+        return BlackboxSDE2DConfig()
+
+
+class AdaptiveNSDE(_BlackboxODE2D):
+    """Adaptive 2-D NSDE: structured + residual + learned diffusion."""
+    _factory_name = "adaptive_nsde"
+
+    @staticmethod
+    def _make_default_config():
+        from ..config import BlackboxSDE2DConfig
+        return BlackboxSDE2DConfig()

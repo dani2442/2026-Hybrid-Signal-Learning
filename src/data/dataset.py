@@ -542,6 +542,11 @@ class Dataset:
             sampling_rate=self.sampling_rate,
         )
 
+    @property
+    def arrays(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return ``(u, y)`` tuple ready for :meth:`BaseModel.fit`."""
+        return self.u, self.y
+
     def split(self, ratio: float = 0.8) -> Tuple["Dataset", "Dataset"]:
         """
         Split dataset into train and test sets.
@@ -559,6 +564,32 @@ class Dataset:
         test = self._subset(split_idx, n, name=f"{self.name}_test", reset_time=True)
 
         return train, test
+
+    def train_val_test_split(
+        self,
+        train: float = 0.7,
+        val: float = 0.15,
+    ) -> Tuple["Dataset", "Dataset", "Dataset"]:
+        """Split into train / validation / test sets.
+
+        Args:
+            train: Fraction for training (default 0.70).
+            val:   Fraction for validation (default 0.15).
+                   Test gets ``1 - train - val``.
+
+        Returns:
+            ``(train_ds, val_ds, test_ds)``
+        """
+        if train + val >= 1.0:
+            raise ValueError("train + val must be < 1.0")
+        n = len(self.t)
+        i1 = int(n * train)
+        i2 = int(n * (train + val))
+
+        train_ds = self._subset(0, i1, name=f"{self.name}_train")
+        val_ds = self._subset(i1, i2, name=f"{self.name}_val", reset_time=True)
+        test_ds = self._subset(i2, n, name=f"{self.name}_test", reset_time=True)
+        return train_ds, val_ds, test_ds
 
     def __repr__(self) -> str:
         return (
