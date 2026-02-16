@@ -11,7 +11,8 @@ from typing import Any, Dict, List
 
 import numpy as np
 
-from .base import BaseModel, resolve_device, DEFAULT_GRAD_CLIP
+from ..config import UDEConfig
+from .base import BaseModel, DEFAULT_GRAD_CLIP
 from .torchsde_utils import (
     ControlledPathMixin,
     inverse_softplus,
@@ -98,10 +99,9 @@ class _UDEFunc(ControlledPathMixin):
 class UDE(BaseModel):
     """Universal Differential Equation: physics + neural residual."""
 
-    def __init__(self, config=None):
-        from ..config import UDEConfig
+    def __init__(self, config: UDEConfig | None = None, **kwargs):
         if config is None:
-            config = UDEConfig()
+            config = UDEConfig(**kwargs)
         super().__init__(config)
         self.sde_func_ = None
         self._device = None
@@ -134,7 +134,7 @@ class UDE(BaseModel):
     def _fit(self, u, y, *, val_data=None, logger=None):
         import torch
         c = self.config
-        self._device = resolve_device(c.device)
+        self._device = self._resolve_torch_device()
         self._dtype = torch.float32
 
         u = np.asarray(u, dtype=float).flatten()
@@ -270,7 +270,7 @@ class UDE(BaseModel):
 
     def _build_for_load(self):
         import torch
-        self._device = torch.device("cpu")
+        self._device = self._resolve_torch_device("cpu")
         self._dtype = torch.float32
         c = self.config
         init_params = {"J": 0.1, "R": 0.1, "K": 1.0, "delta": 0.0}

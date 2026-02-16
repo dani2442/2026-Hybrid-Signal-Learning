@@ -19,7 +19,8 @@ from typing import Any, Dict
 
 import numpy as np
 
-from .base import BaseModel, resolve_device, SHOOTING_GRAD_CLIP
+from ..config import BlackboxODE2DConfig, BlackboxSDE2DConfig
+from .base import BaseModel, SHOOTING_GRAD_CLIP
 from .torchsde_utils import interp_u
 
 
@@ -223,18 +224,17 @@ class _BlackboxODE2D(BaseModel):
 
     _factory_name: str = "vanilla"
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, **kwargs):
         if config is None:
-            config = self._make_default_config()
+            config = self._make_default_config(**kwargs)
         super().__init__(config)
         self.func_ = None
         self._device = None
         self._dtype = None
 
     @staticmethod
-    def _make_default_config():
-        from ..config import BlackboxODE2DConfig
-        return BlackboxODE2DConfig()
+    def _make_default_config(**kwargs):
+        return BlackboxODE2DConfig(**kwargs)
 
     # ── helpers ───────────────────────────────────────────────────────
 
@@ -284,7 +284,7 @@ class _BlackboxODE2D(BaseModel):
         else:
             y_sim = y
 
-        self._device = resolve_device(c.device)
+        self._device = self._resolve_torch_device()
         self._dtype = torch.float32
 
         factory = _FACTORIES[self._factory_name]
@@ -408,9 +408,8 @@ class _BlackboxODE2D(BaseModel):
         self.func_.load_state_dict(sd)
 
     def _build_for_load(self):
-        import torch
         c = self.config
-        self._device = torch.device("cpu")
+        self._device = self._resolve_torch_device("cpu")
         self._dtype = torch.float32
         factory = _FACTORIES[self._factory_name]
         self.func_ = factory(c.hidden_dim).to(self._device)
@@ -449,9 +448,8 @@ class VanillaNSDE2D(_BlackboxODE2D):
     _factory_name = "vanilla_nsde"
 
     @staticmethod
-    def _make_default_config():
-        from ..config import BlackboxSDE2DConfig
-        return BlackboxSDE2DConfig()
+    def _make_default_config(**kwargs):
+        return BlackboxSDE2DConfig(**kwargs)
 
 
 class StructuredNSDE(_BlackboxODE2D):
@@ -459,9 +457,8 @@ class StructuredNSDE(_BlackboxODE2D):
     _factory_name = "structured_nsde"
 
     @staticmethod
-    def _make_default_config():
-        from ..config import BlackboxSDE2DConfig
-        return BlackboxSDE2DConfig()
+    def _make_default_config(**kwargs):
+        return BlackboxSDE2DConfig(**kwargs)
 
 
 class AdaptiveNSDE(_BlackboxODE2D):
@@ -469,6 +466,5 @@ class AdaptiveNSDE(_BlackboxODE2D):
     _factory_name = "adaptive_nsde"
 
     @staticmethod
-    def _make_default_config():
-        from ..config import BlackboxSDE2DConfig
-        return BlackboxSDE2DConfig()
+    def _make_default_config(**kwargs):
+        return BlackboxSDE2DConfig(**kwargs)

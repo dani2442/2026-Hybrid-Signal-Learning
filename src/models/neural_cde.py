@@ -10,7 +10,8 @@ from typing import Any, Dict, List
 
 import numpy as np
 
-from .base import BaseModel, resolve_device, DEFAULT_GRAD_CLIP
+from ..config import NeuralCDEConfig
+from .base import BaseModel, DEFAULT_GRAD_CLIP
 
 
 # ── helper builders ───────────────────────────────────────────────────
@@ -65,10 +66,9 @@ class NeuralCDE(BaseModel):
     _VALID_SOLVERS = {"dopri5", "rk4", "euler", "midpoint"}
     _VALID_INTERPOLATIONS = {"cubic", "linear"}
 
-    def __init__(self, config=None):
-        from ..config import NeuralCDEConfig
+    def __init__(self, config: NeuralCDEConfig | None = None, **kwargs):
         if config is None:
-            config = NeuralCDEConfig()
+            config = NeuralCDEConfig(**kwargs)
         super().__init__(config)
         c = self.config
         if c.solver not in self._VALID_SOLVERS:
@@ -139,7 +139,7 @@ class NeuralCDE(BaseModel):
         from tqdm.auto import tqdm
         c = self.config
 
-        self._device = resolve_device(c.device)
+        self._device = self._resolve_torch_device()
         self._dtype = torch.float32
 
         u = np.asarray(u, dtype=float).flatten()
@@ -294,7 +294,7 @@ class NeuralCDE(BaseModel):
 
     def _build_for_load(self):
         import torch
-        self._device = torch.device("cpu")
+        self._device = self._resolve_torch_device("cpu")
         self._dtype = torch.float32
         self._build_networks()
 

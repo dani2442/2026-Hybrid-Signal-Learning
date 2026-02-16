@@ -6,7 +6,8 @@ from typing import Any, Dict, Iterable
 
 import numpy as np
 
-from .base import BaseModel, resolve_device
+from ..config import HybridNonlinearCamConfig
+from .base import BaseModel
 from .torchsde_utils import (
     ControlledPathMixin,
     inverse_softplus,
@@ -119,10 +120,9 @@ class _NonlinearCamSDEFunc(ControlledPathMixin):
 class HybridNonlinearCam(BaseModel):
     """Nonlinear cam-bar-motor hybrid model."""
 
-    def __init__(self, config=None):
-        from ..config import HybridNonlinearCamConfig
+    def __init__(self, config: HybridNonlinearCamConfig | None = None, **kwargs):
         if config is None:
-            config = HybridNonlinearCamConfig()
+            config = HybridNonlinearCamConfig(**kwargs)
         super().__init__(config)
         self.sde_func_ = None
         self._device = None
@@ -150,7 +150,7 @@ class HybridNonlinearCam(BaseModel):
         u = np.asarray(u, dtype=float).flatten()
         y = np.asarray(y, dtype=float).flatten()
 
-        self._device = resolve_device(c.device)
+        self._device = self._resolve_torch_device()
 
         self.sde_func_ = _NonlinearCamSDEFunc(
             dt=c.dt, params=self._get_physics_dict(),
@@ -234,9 +234,8 @@ class HybridNonlinearCam(BaseModel):
                 p.data.copy_(state[key])
 
     def _build_for_load(self):
-        import torch
         c = self.config
-        self._device = torch.device("cpu")
+        self._device = self._resolve_torch_device("cpu")
         self.sde_func_ = _NonlinearCamSDEFunc(
             dt=c.dt, params=self._get_physics_dict(),
             trainable_params=c.trainable_params, device=self._device)

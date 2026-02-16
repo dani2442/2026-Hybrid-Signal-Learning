@@ -15,4 +15,14 @@ dependencies = [
     "torchsde>=0.2.6",
     "tqdm>=4.67.2",
     "wandb>=0.24.2",
+    "transformers>=5.1.0",
+    "mamba-ssm>=2.3.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
-from tqdm.auto import tqdm
 
 from ..config import NeuralNetworkConfig
 from ..utils.regression import create_lagged_features
-from .base import BaseModel, resolve_device
+from .base import BaseModel
+from .training import train_supervised_torch_model
 
 
 class NeuralNetwork(BaseModel):
@@ -70,7 +70,7 @@ class NeuralNetwork(BaseModel):
         if len(target) == 0:
             raise ValueError("Not enough data for given lag orders")
 
-        self._device = resolve_device(cfg.device)
+        self._device = self._resolve_torch_device()
         self.model_ = self._build_model(features.shape[1]).to(self._device)
 
         X = torch.tensor(features, dtype=torch.float32, device=self._device)
@@ -89,61 +89,23 @@ class NeuralNetwork(BaseModel):
         optimizer = optim.NAdam(self.model_.parameters(), lr=cfg.learning_rate)
         criterion = nn.MSELoss()
 
-        best_val_loss = float("inf")
-        best_state = None
-        patience_counter = 0
-        patience = cfg.early_stopping_patience or float("inf")
-
-        epoch_iter = range(cfg.epochs)
-        if cfg.verbose:
-            epoch_iter = tqdm(epoch_iter, desc="Training NeuralNetwork", unit="epoch")
-
-        for epoch in epoch_iter:
-            self.model_.train()
-            epoch_loss = 0.0
-            for bx, by in loader:
-                optimizer.zero_grad()
-                loss = criterion(self.model_(bx).squeeze(), by)
-                loss.backward()
-                optimizer.step()
-                epoch_loss += loss.item()
-            avg_train = epoch_loss / len(loader)
-            self.training_loss_.append(avg_train)
-
-            avg_val = None
-            if val_loader is not None:
-                self.model_.eval()
-                val_loss = 0.0
-                with torch.no_grad():
-                    for bx, by in val_loader:
-                        val_loss += criterion(self.model_(bx).squeeze(), by).item()
-                avg_val = val_loss / len(val_loader)
-
-            monitor = avg_val if avg_val is not None else avg_train
-            if monitor < best_val_loss:
-                best_val_loss = monitor
-                best_state = {k: v.clone() for k, v in self.model_.state_dict().items()}
-                patience_counter = 0
-            else:
-                patience_counter += 1
-            if patience_counter >= patience:
-                if cfg.verbose:
-                    print(f"Early stopping at epoch {epoch + 1}")
-                break
-
-            postfix = {"loss": avg_train}
-            if avg_val is not None:
-                postfix["val"] = avg_val
-            if cfg.verbose and hasattr(epoch_iter, "set_postfix"):
-                epoch_iter.set_postfix(postfix)
-            if logger and logger.active and (epoch + 1) % cfg.wandb_log_every == 0:
-                metrics = {"train/loss": avg_train, "train/epoch": epoch + 1}
-                if avg_val is not None:
-                    metrics["val/loss"] = avg_val
-                logger.log_metrics(metrics, step=epoch + 1)
-
-        if best_state is not None:
-            self.model_.load_state_dict(best_state)
+        self.training_loss_ = list(
+            train_supervised_torch_model(
+                model=self.model_,
+                optimizer=optimizer,
+                criterion=criterion,
+                train_loader=loader,
+                epochs=cfg.epochs,
+                verbose=cfg.verbose,
+                progress_desc="Training NeuralNetwork",
+                forward_fn=self.model_,
+                val_loader=val_loader,
+                grad_clip_norm=None,
+                early_stopping_patience=cfg.early_stopping_patience,
+                logger=logger,
+                log_every=cfg.wandb_log_every,
+            )
+        )
 
     # ── prediction ────────────────────────────────────────────────────
 
@@ -193,7 +155,6 @@ class NeuralNetwork(BaseModel):
             self.model_.load_state_dict(state["model"])
 
     def _build_for_load(self) -> None:
-        import torch
-        self._device = torch.device("cpu")
+        self._device = self._resolve_torch_device("cpu")
         n_inputs = self.config.ny + self.config.nu
         self.model_ = self._build_model(n_inputs).to(self._device)

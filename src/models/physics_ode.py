@@ -13,7 +13,8 @@ from typing import Any, Dict
 
 import numpy as np
 
-from .base import BaseModel, resolve_device, DEFAULT_GRAD_CLIP
+from ..config import LinearPhysicsConfig, StribeckPhysicsConfig
+from .base import BaseModel, DEFAULT_GRAD_CLIP
 from .torchsde_utils import interp_u
 
 
@@ -124,7 +125,7 @@ class _PhysODEModel(BaseModel):
     def _fit(self, u, y, *, val_data=None, logger=None):
         import torch
         c = self.config
-        self._device = resolve_device(c.device)
+        self._device = self._resolve_torch_device()
         self._dtype = torch.float32
         self.ode_func_ = self.ode_factory().to(self._device)
 
@@ -261,7 +262,7 @@ class _PhysODEModel(BaseModel):
 
     def _build_for_load(self):
         import torch
-        self._device = torch.device("cpu")
+        self._device = self._resolve_torch_device("cpu")
         self._dtype = torch.float32
         self.ode_func_ = self.ode_factory().to(self._device)
 
@@ -271,10 +272,9 @@ class _PhysODEModel(BaseModel):
 class LinearPhysics(_PhysODEModel):
     """Linear 2nd-order beam: J·θ̈ + R·θ̇ + K·(θ+δ) = τ·V"""
 
-    def __init__(self, config=None):
-        from ..config import LinearPhysicsConfig
+    def __init__(self, config: LinearPhysicsConfig | None = None, **kwargs):
         if config is None:
-            config = LinearPhysicsConfig()
+            config = LinearPhysicsConfig(**kwargs)
         super().__init__(config, ode_factory=_build_linear_ode)
 
     def __repr__(self):
@@ -284,10 +284,9 @@ class LinearPhysics(_PhysODEModel):
 class StribeckPhysics(_PhysODEModel):
     """Linear beam + Stribeck friction."""
 
-    def __init__(self, config=None):
-        from ..config import StribeckPhysicsConfig
+    def __init__(self, config: StribeckPhysicsConfig | None = None, **kwargs):
         if config is None:
-            config = StribeckPhysicsConfig()
+            config = StribeckPhysicsConfig(**kwargs)
         super().__init__(config, ode_factory=_build_stribeck_ode)
 
     def __repr__(self):

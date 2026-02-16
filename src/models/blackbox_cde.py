@@ -9,6 +9,7 @@ AdaptiveNCDE   - structured + near-zero residual
 
 from __future__ import annotations
 
+from ..config import BlackboxCDE2DConfig
 from .blackbox_ode import _BlackboxODE2D, _FACTORIES, _selu_block, _tanh_block
 from .torchsde_utils import interp_u
 
@@ -89,9 +90,8 @@ class VanillaNCDE2D(_BlackboxODE2D):
     _factory_name = "vanilla_ncde"
 
     @staticmethod
-    def _make_default_config():
-        from ..config import BlackboxCDE2DConfig
-        return BlackboxCDE2DConfig()
+    def _make_default_config(**kwargs):
+        return BlackboxCDE2DConfig(**kwargs)
 
 
 class StructuredNCDE(_BlackboxODE2D):
@@ -99,9 +99,8 @@ class StructuredNCDE(_BlackboxODE2D):
     _factory_name = "structured_ncde"
 
     @staticmethod
-    def _make_default_config():
-        from ..config import BlackboxCDE2DConfig
-        return BlackboxCDE2DConfig()
+    def _make_default_config(**kwargs):
+        return BlackboxCDE2DConfig(**kwargs)
 
 
 class AdaptiveNCDE(_BlackboxODE2D):
@@ -109,6 +108,5 @@ class AdaptiveNCDE(_BlackboxODE2D):
     _factory_name = "adaptive_ncde"
 
     @staticmethod
-    def _make_default_config():
-        from ..config import BlackboxCDE2DConfig
-        return BlackboxCDE2DConfig()
+    def _make_default_config(**kwargs):
+        return BlackboxCDE2DConfig(**kwargs)

@@ -11,59 +11,26 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from src.data import Dataset
-from src.config import MODEL_CONFIGS
+from src.models.registry import get_model_class, get_model_config_class, list_model_keys
 from src.validation import Metrics
 from src.visualization import plot_predictions
 from src.utils import ensure_proxy_env
 
-# Map of friendly name → (model class import path, config class key)
-_MODEL_REGISTRY: dict[str, str] = {
-    "narx": "NARX",
-    "arima": "ARIMA",
-    "exponential_smoothing": "ExponentialSmoothing",
-    "random_forest": "RandomForest",
-    "neural_network": "NeuralNetwork",
-    "gru": "GRU",
-    "lstm": "LSTM",
-    "tcn": "TCN",
-    "mamba": "Mamba",
-    "neural_ode": "NeuralODE",
-    "neural_sde": "NeuralSDE",
-    "neural_cde": "NeuralCDE",
-    "linear_physics": "LinearPhysics",
-    "stribeck_physics": "StribeckPhysics",
-    "hybrid_linear_beam": "HybridLinearBeam",
-    "hybrid_nonlinear_cam": "HybridNonlinearCam",
-    "ude": "UDE",
-    "vanilla_node_2d": "VanillaNODE2D",
-    "structured_node": "StructuredNODE",
-    "adaptive_node": "AdaptiveNODE",
-    "vanilla_ncde_2d": "VanillaNCDE2D",
-    "structured_ncde": "StructuredNCDE",
-    "adaptive_ncde": "AdaptiveNCDE",
-    "vanilla_nsde_2d": "VanillaNSDE2D",
-    "structured_nsde": "StructuredNSDE",
-    "adaptive_nsde": "AdaptiveNSDE",
-}
-
-
-def _get_model_class(name: str):
-    """Import and return the model class by friendly name."""
-    import src.models as m
-
-    class_name = _MODEL_REGISTRY[name]
-    return getattr(m, class_name)
-
-
 def main():
+    model_keys = sorted(list_model_keys())
+
     parser = argparse.ArgumentParser(description="Train a single model.")
     parser.add_argument(
         "--model",
         default="gru",
-        choices=sorted(_MODEL_REGISTRY),
+        choices=model_keys,
         help="Model name (default: gru)",
     )
     parser.add_argument(
@@ -78,6 +45,11 @@ def main():
         default="checkpoints",
         help="Directory for saved models (default: checkpoints)",
     )
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="Runtime device: auto | cpu | cuda | cuda:N (default: auto)",
+    )
     args = parser.parse_args()
 
     ensure_proxy_env()
@@ -88,16 +60,17 @@ def main():
     print(f"Dataset: {ds.name}  ({len(train_ds)} train / {len(val_ds)} val / {len(test_ds)} test)")
 
     # ── Config ────────────────────────────────────────────────────────
-    config_cls = MODEL_CONFIGS[args.model]
+    config_cls = get_model_config_class(args.model)
     config = config_cls()
     if args.epochs is not None:
         config.epochs = args.epochs
+    config.device = args.device
     if args.wandb:
         config.wandb_project = args.wandb
         config.wandb_run_name = f"{args.model}_{args.dataset}"
 
     # ── Train ─────────────────────────────────────────────────────────
-    model_cls = _get_model_class(args.model)
+    model_cls = get_model_class(args.model)
     model = model_cls(config)
     print(f"\nTraining {model!r} …")
     model.fit(train_ds.arrays, val_data=val_ds.arrays)

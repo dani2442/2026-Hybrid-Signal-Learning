@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 import time
 from dataclasses import asdict, dataclass
@@ -12,22 +11,7 @@ from typing import Callable, Iterable
 import numpy as np
 
 from ..data import Dataset
-from ..models import (
-    NARX,
-    NeuralODE,
-    NeuralSDE,
-    NeuralCDE,
-    RandomForest,
-    LinearPhysics,
-    StribeckPhysics,
-)
-from ..models.blackbox_ode import VanillaNODE2D, StructuredNODE, AdaptiveNODE
-from ..models.gru import GRU
-from ..models.lstm import LSTM
-from ..models.neural_network import NeuralNetwork
-from ..models.tcn import TCN
-from ..models.ude import UDE
-from ..models.mamba import Mamba
+from ..models.registry import get_model_class, get_model_config_class
 from ..validation.metrics import Metrics
 
 
@@ -55,16 +39,25 @@ class BenchmarkConfig:
 
 def _base_case_factories() -> dict[str, BenchmarkCase]:
     """Canonical benchmark cases with balanced runtime and model diversity."""
+
+    def _make_model(key: str, **config_overrides):
+        model_cls = get_model_class(key)
+        config_cls = get_model_config_class(key)
+        return model_cls(config_cls(**config_overrides))
+
     return {
         "narx": BenchmarkCase(
             key="narx",
             name="NARX",
-            factory=lambda dt: NARX(nu=10, ny=10, poly_order=2, selection_criteria=10),
+            factory=lambda dt: _make_model(
+                "narx", nu=10, ny=10, poly_order=2, selection_criteria=10
+            ),
         ),
         "random_forest": BenchmarkCase(
             key="random_forest",
             name="RandomForest",
-            factory=lambda dt: RandomForest(
+            factory=lambda dt: _make_model(
+                "random_forest",
                 nu=10,
                 ny=10,
                 n_estimators=100,
@@ -75,7 +68,8 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
         "neural_ode": BenchmarkCase(
             key="neural_ode",
             name="NeuralODE",
-            factory=lambda dt: NeuralODE(
+            factory=lambda dt: _make_model(
+                "neural_ode",
                 state_dim=1,
                 input_dim=1,
                 hidden_layers=[64, 64],
@@ -91,7 +85,8 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
         "neural_sde": BenchmarkCase(
             key="neural_sde",
             name="NeuralSDE",
-            factory=lambda dt: NeuralSDE(
+            factory=lambda dt: _make_model(
+                "neural_sde",
                 state_dim=1,
                 input_dim=1,
                 hidden_layers=[64, 64],
@@ -106,7 +101,8 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
         "neural_cde": BenchmarkCase(
             key="neural_cde",
             name="NeuralCDE",
-            factory=lambda dt: NeuralCDE(
+            factory=lambda dt: _make_model(
+                "neural_cde",
                 hidden_dim=32,
                 input_dim=2,
                 hidden_layers=[64, 64],
@@ -120,9 +116,9 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
         "linear_physics": BenchmarkCase(
             key="linear_physics",
             name="LinearPhysics",
-            factory=lambda dt: LinearPhysics(
+            factory=lambda dt: _make_model(
+                "linear_physics",
                 dt=dt,
-                solver="rk4",
                 learning_rate=1e-3,
                 epochs=1000,
             ),
@@ -130,9 +126,9 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
         "stribeck_physics": BenchmarkCase(
             key="stribeck_physics",
             name="StribeckPhysics",
-            factory=lambda dt: StribeckPhysics(
+            factory=lambda dt: _make_model(
+                "stribeck_physics",
                 dt=dt,
-                solver="rk4",
                 learning_rate=1e-3,
                 epochs=1000,
             ),
@@ -140,7 +136,8 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
         "lstm": BenchmarkCase(
             key="lstm",
             name="LSTM",
-            factory=lambda dt: LSTM(
+            factory=lambda dt: _make_model(
+                "lstm",
                 nu=10,
                 ny=10,
                 hidden_size=64,
@@ -154,7 +151,8 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
         "tcn": BenchmarkCase(
             key="tcn",
             name="TCN",
-            factory=lambda dt: TCN(
+            factory=lambda dt: _make_model(
+                "tcn",
                 nu=10,
                 ny=10,
                 num_channels=[64, 64, 64, 64],
@@ -168,21 +166,21 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
         "ude": BenchmarkCase(
             key="ude",
             name="UDE",
-            factory=lambda dt: UDE(
-                sampling_time=dt,
-                tau=1.0,
+            factory=lambda dt: _make_model(
+                "ude",
+                dt=dt,
                 hidden_layers=[64, 64],
                 learning_rate=1e-3,
                 epochs=1000,
                 sequence_length=50,
-                integration_substeps=5,
                 training_mode="full",
             ),
         ),
         "mamba": BenchmarkCase(
             key="mamba",
             name="Mamba",
-            factory=lambda dt: Mamba(
+            factory=lambda dt: _make_model(
+                "mamba",
                 nu=10,
                 ny=10,
                 d_model=64,
@@ -199,7 +197,8 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
         "gru": BenchmarkCase(
             key="gru",
             name="GRU",
-            factory=lambda dt: GRU(
+            factory=lambda dt: _make_model(
+                "gru",
                 nu=10,
                 ny=10,
                 hidden_size=64,
@@ -213,7 +212,8 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
         "neural_network": BenchmarkCase(
             key="neural_network",
             name="Neural Network",
-            factory=lambda dt: NeuralNetwork(
+            factory=lambda dt: _make_model(
+                "neural_network",
                 nu=10,
                 ny=10,
                 hidden_layers=[80, 80, 80],
@@ -226,7 +226,8 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
         "vanilla_node_2d": BenchmarkCase(
             key="vanilla_node_2d",
             name="VanillaNODE2D",
-            factory=lambda dt: VanillaNODE2D(
+            factory=lambda dt: _make_model(
+                "vanilla_node_2d",
                 hidden_dim=128,
                 dt=dt,
                 solver="rk4",
@@ -239,7 +240,8 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
         "structured_node": BenchmarkCase(
             key="structured_node",
             name="StructuredNODE",
-            factory=lambda dt: StructuredNODE(
+            factory=lambda dt: _make_model(
+                "structured_node",
                 hidden_dim=128,
                 dt=dt,
                 solver="rk4",
@@ -252,7 +254,8 @@ def _base_case_factories() -> dict[str, BenchmarkCase]:
         "adaptive_node": BenchmarkCase(
             key="adaptive_node",
             name="AdaptiveNODE",
-            factory=lambda dt: AdaptiveNODE(
+            factory=lambda dt: _make_model(
+                "adaptive_node",
                 hidden_dim=128,
                 dt=dt,
                 solver="rk4",
@@ -297,16 +300,9 @@ class BenchmarkRunner:
 
     @staticmethod
     def _fit_model(model, u, y, wandb_run=None):
-        """Call model.fit with optional W&B args when supported."""
-        fit_sig = inspect.signature(model.fit)
-        kwargs = {}
-        if "verbose" in fit_sig.parameters:
-            kwargs["verbose"] = True
-        if wandb_run is not None and "wandb_run" in fit_sig.parameters:
-            kwargs["wandb_run"] = wandb_run
-            if "wandb_log_every" in fit_sig.parameters:
-                kwargs["wandb_log_every"] = 1
-        model.fit(u, y, **kwargs)
+        """Call model.fit using the unified BaseModel interface."""
+        del wandb_run  # logging is configured through model config
+        model.fit((u, y))
 
     @staticmethod
     def _evaluate_mode(model, mode: str, test_ds: Dataset) -> tuple[dict[str, float], int]:

@@ -11,14 +11,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from src.data import Dataset
-from src.config import MODEL_CONFIGS
+from src.models.registry import (
+    get_model_class,
+    get_model_config_class,
+    list_model_keys,
+)
 from src.validation import Metrics
 from src.visualization import plot_predictions
+from src.utils import ensure_proxy_env
 
 # Models that work out-of-the-box on the BAB (2-D rotary beam) data.
 # Excludes hybrid_nonlinear_cam which requires cam-specific geometry.
@@ -33,8 +42,8 @@ DEFAULT_MODELS: list[str] = [
     "tcn",
     # "mamba",            # uncomment if mamba-ssm is installed
     "neural_ode",
-    # "neural_sde",
-    # "neural_cde",
+    "neural_sde",
+    "neural_cde",
     "linear_physics",
     "stribeck_physics",
     "hybrid_linear_beam",
@@ -42,28 +51,23 @@ DEFAULT_MODELS: list[str] = [
     "vanilla_node_2d",
     "structured_node",
     "adaptive_node",
-    # "vanilla_ncde_2d",
-    # "structured_ncde",
-    # "adaptive_ncde",
-    # "vanilla_nsde_2d",
-    # "structured_nsde",
-    # "adaptive_nsde",
+    "vanilla_ncde_2d",
+    "structured_ncde",
+    "adaptive_ncde",
+    "vanilla_nsde_2d",
+    "structured_nsde",
+    "adaptive_nsde",
 ]
-
-
-def _get_model_class(name: str):
-    import src.models as m
-
-    from examples.train_single import _MODEL_REGISTRY
-
-    return getattr(m, _MODEL_REGISTRY[name])
-
-
 def main():
     parser = argparse.ArgumentParser(description="Train all models and compare.")
     parser.add_argument("--dataset", default="multisine_05")
     parser.add_argument("--wandb", default=None, help="W&B project name")
     parser.add_argument("--out-dir", default="checkpoints")
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="Runtime device: auto | cpu | cuda | cuda:N (default: auto)",
+    )
     parser.add_argument(
         "--models",
         nargs="*",
@@ -72,6 +76,9 @@ def main():
     )
     args = parser.parse_args()
 
+    ensure_proxy_env()
+
+    available_models = set(list_model_keys())
     model_names = args.models or DEFAULT_MODELS
 
     # ── Data ──────────────────────────────────────────────────────────
@@ -88,16 +95,17 @@ def main():
     predictions_fr: dict[str, np.ndarray] = {}
 
     for name in model_names:
-        if name not in MODEL_CONFIGS:
+        if name not in available_models:
             print(f"⚠  Unknown model '{name}', skipping.")
             continue
 
-        config = MODEL_CONFIGS[name]()
+        config = get_model_config_class(name)()
+        config.device = args.device
         if args.wandb:
             config.wandb_project = args.wandb
             config.wandb_run_name = f"{name}_{args.dataset}"
 
-        model_cls = _get_model_class(name)
+        model_cls = get_model_class(name)
         model = model_cls(config)
         print(f"{'─' * 60}\nTraining {model!r}")
 

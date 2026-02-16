@@ -15,9 +15,9 @@ from abc import abstractmethod
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
-from tqdm.auto import tqdm
 
-from .base import BaseModel, resolve_device, DEFAULT_GRAD_CLIP, NORM_EPS
+from .base import BaseModel, DEFAULT_GRAD_CLIP, NORM_EPS
+from .training import train_supervised_torch_model
 
 
 class SequenceModel(BaseModel):
@@ -85,7 +85,7 @@ class SequenceModel(BaseModel):
         if len(Y) == 0:
             raise ValueError("Not enough data for given lag orders")
 
-        self._device = resolve_device(cfg.device)
+        self._device = self._resolve_torch_device()
 
         self.model_ = self._build_model(input_size=2).to(self._device)
 
@@ -116,71 +116,23 @@ class SequenceModel(BaseModel):
         optimizer = optim.Adam(self.model_.parameters(), lr=cfg.learning_rate)
         criterion = nn.MSELoss()
 
-        best_val_loss = float("inf")
-        best_state = None
-        patience_counter = 0
-        patience = cfg.early_stopping_patience or float("inf")
-
-        epoch_iter = range(cfg.epochs)
-        if cfg.verbose:
-            epoch_iter = tqdm(epoch_iter, desc=f"Training {type(self).__name__}", unit="epoch")
-
-        for epoch in epoch_iter:
-            # ── train step ────────────────────────────────────────────
-            self.model_.train()
-            epoch_loss = 0.0
-            for bx, by in loader:
-                optimizer.zero_grad()
-                pred = self._forward(bx)
-                loss = criterion(pred.squeeze(), by)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model_.parameters(), DEFAULT_GRAD_CLIP)
-                optimizer.step()
-                epoch_loss += loss.item()
-            avg_train = epoch_loss / len(loader)
-            self.training_loss_.append(avg_train)
-
-            # ── val step ──────────────────────────────────────────────
-            avg_val = None
-            if val_loader is not None:
-                self.model_.eval()
-                val_loss = 0.0
-                with torch.no_grad():
-                    for bx, by in val_loader:
-                        pred = self._forward(bx)
-                        val_loss += criterion(pred.squeeze(), by).item()
-                avg_val = val_loss / len(val_loader)
-
-            # ── early stopping on val (or train if no val) ────────────
-            monitor = avg_val if avg_val is not None else avg_train
-            if monitor < best_val_loss:
-                best_val_loss = monitor
-                best_state = {k: v.clone() for k, v in self.model_.state_dict().items()}
-                patience_counter = 0
-            else:
-                patience_counter += 1
-
-            if patience_counter >= patience:
-                if cfg.verbose:
-                    print(f"Early stopping at epoch {epoch + 1}")
-                break
-
-            # ── logging ───────────────────────────────────────────────
-            postfix = {"loss": avg_train}
-            if avg_val is not None:
-                postfix["val"] = avg_val
-            if cfg.verbose and hasattr(epoch_iter, "set_postfix"):
-                epoch_iter.set_postfix(postfix)
-
-            if logger and logger.active and (epoch + 1) % cfg.wandb_log_every == 0:
-                metrics = {"train/loss": avg_train, "train/epoch": epoch + 1}
-                if avg_val is not None:
-                    metrics["val/loss"] = avg_val
-                logger.log_metrics(metrics, step=epoch + 1)
-
-        # Restore best weights
-        if best_state is not None:
-            self.model_.load_state_dict(best_state)
+        self.training_loss_ = list(
+            train_supervised_torch_model(
+                model=self.model_,
+                optimizer=optimizer,
+                criterion=criterion,
+                train_loader=loader,
+                epochs=cfg.epochs,
+                verbose=cfg.verbose,
+                progress_desc=f"Training {type(self).__name__}",
+                forward_fn=self._forward,
+                val_loader=val_loader,
+                grad_clip_norm=DEFAULT_GRAD_CLIP,
+                early_stopping_patience=cfg.early_stopping_patience,
+                logger=logger,
+                log_every=cfg.wandb_log_every,
+            )
+        )
 
     def _forward(self, x):
         """Run forward pass, handling models that return (output, hidden)."""
@@ -263,9 +215,7 @@ class SequenceModel(BaseModel):
         self._u_std = extra.get("u_std", 1.0)
 
     def _build_for_load(self) -> None:
-        import torch
-
-        self._device = torch.device("cpu")
+        self._device = self._resolve_torch_device("cpu")
         self.model_ = self._build_model(input_size=2).to(self._device)
 
     def __repr__(self) -> str:

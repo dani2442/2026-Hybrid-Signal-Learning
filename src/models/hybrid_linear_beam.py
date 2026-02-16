@@ -9,7 +9,8 @@ from typing import Any, Dict
 
 import numpy as np
 
-from .base import BaseModel, resolve_device
+from ..config import HybridLinearBeamConfig
+from .base import BaseModel
 from .torchsde_utils import (
     ControlledPathMixin,
     inverse_softplus,
@@ -81,10 +82,9 @@ class _LinearBeamSDEFunc(ControlledPathMixin):
 class HybridLinearBeam(BaseModel):
     """Linear beam physics model: J*θ̈ + R*θ̇ + K*(θ+δ) = τ*V."""
 
-    def __init__(self, config=None):
-        from ..config import HybridLinearBeamConfig
+    def __init__(self, config: HybridLinearBeamConfig | None = None, **kwargs):
         if config is None:
-            config = HybridLinearBeamConfig()
+            config = HybridLinearBeamConfig(**kwargs)
         super().__init__(config)
         self.sde_func_ = None
         self._device = None
@@ -129,7 +129,7 @@ class HybridLinearBeam(BaseModel):
         u = np.asarray(u, dtype=float).flatten()
         y = np.asarray(y, dtype=float).flatten()
 
-        self._device = resolve_device(c.device)
+        self._device = self._resolve_torch_device()
 
         init_params = self._initial_guess(u, y)
         self.sde_func_ = _LinearBeamSDEFunc(
@@ -202,9 +202,8 @@ class HybridLinearBeam(BaseModel):
             getattr(self.sde_func_, name).data.copy_(val)
 
     def _build_for_load(self):
-        import torch
         c = self.config
-        self._device = torch.device("cpu")
+        self._device = self._resolve_torch_device("cpu")
         init_params = {"J": 0.1, "R": 0.1, "K": 1.0, "delta": 0.0}
         self.sde_func_ = _LinearBeamSDEFunc(
             dt=c.dt, tau=c.tau, estimate_delta=c.estimate_delta,
