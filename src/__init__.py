@@ -1,88 +1,34 @@
-"""Control System Identification Library."""
+"""Hybrid Modeling — system identification with classical, neural, and
+physics-informed models.
 
-from .models import (
-    ARIMA,
-    GRU,
-    HybridLinearBeam,
-    HybridNonlinearCam,
-    LSTM,
-    LinearPhysics,
-    NARX,
-    NeuralCDE,
-    NeuralNetwork,
-    NeuralODE,
-    NeuralSDE,
-    RandomForest,
-    StribeckPhysics,
-    VanillaNODE2D,
-    StructuredNODE,
-    AdaptiveNODE,
-    VanillaNCDE2D,
-    StructuredNCDE,
-    AdaptiveNCDE,
-    VanillaNSDE2D,
-    StructuredNSDE,
-    AdaptiveNSDE,
-    TCN,
-    UDE,
-    ExponentialSmoothing,
-    Mamba,
-)
-from .data import Dataset
-from .benchmarking import (
-    BenchmarkCase,
-    BenchmarkConfig,
-    BenchmarkRunner,
-    build_benchmark_cases,
-    summarize_results,
-)
-from .visualization import (
-    plot_predictions,
-    plot_spectrograms,
-    plot_residuals,
-    plot_signals,
-    plot_model_comparison,
-)
-from .validation import Metrics
+Public API
+----------
+::
 
-__version__ = "0.1.0"
+    from src.data import Dataset, from_bab_experiment, DatasetCollection
+    from src.models import build_model, list_models, load_model
+    from src.validation import metrics
+    from src.config import BaseConfig
+"""
+
+# Eager-import models so decorators register
+import src.models  # noqa: F401
+
+from src.config import BaseConfig
+from src.data import Dataset, DatasetCollection, from_bab_experiment, from_mat
+from src.models import build_model, list_models, load_model
+from src.validation import metrics
+from src.wandb_logger import WandbLogger
+
 __all__ = [
-    "NARX",
-    "ARIMA",
-    "NeuralNetwork",
-    "NeuralCDE",
-    "NeuralODE",
-    "NeuralSDE",
-    "ExponentialSmoothing",
-    "RandomForest",
-    "GRU",
-    "LSTM",
-    "TCN",
-    "UDE",
-    "Mamba",
-    "HybridLinearBeam",
-    "HybridNonlinearCam",
-    "LinearPhysics",
-    "StribeckPhysics",
-    "VanillaNODE2D",
-    "StructuredNODE",
-    "AdaptiveNODE",
-    "VanillaNCDE2D",
-    "StructuredNCDE",
-    "AdaptiveNCDE",
-    "VanillaNSDE2D",
-    "StructuredNSDE",
-    "AdaptiveNSDE",
-    "BenchmarkCase",
-    "BenchmarkConfig",
-    "BenchmarkRunner",
-    "build_benchmark_cases",
-    "summarize_results",
+    "BaseConfig",
     "Dataset",
-    "Metrics",
-    "plot_predictions",
-    "plot_spectrograms",
-    "plot_residuals",
-    "plot_signals",
-    "plot_model_comparison",
+    "DatasetCollection",
+    "WandbLogger",
+    "build_model",
+    "from_bab_experiment",
+    "from_mat",
+    "list_models",
+    "load_model",
+    "metrics",
 ]

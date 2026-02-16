@@ -1,464 +1,180 @@
-"""Benchmark runner for model-to-model comparison on shared datasets."""
+"""Benchmarking runner — evaluate registered models on datasets."""
 
 from __future__ import annotations
 
 import json
+import os
 import time
-from dataclasses import asdict, dataclass
-from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from ..data import Dataset
-from ..models.registry import get_model_class, get_model_config_class
-from ..validation.metrics import Metrics
+from src.data import Dataset
+from src.models import build_model, list_models
+from src.validation.metrics import compute_all, summary
 
 
-@dataclass(frozen=True)
-class BenchmarkCase:
-    """Single model benchmark configuration."""
+def run_single_benchmark(
+    model_name: str,
+    train_data: tuple[np.ndarray, np.ndarray],
+    test_data: tuple[np.ndarray, np.ndarray],
+    *,
+    val_data: tuple[np.ndarray, np.ndarray] | None = None,
+    config_overrides: Dict[str, Any] | None = None,
+    logger=None,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """Train and evaluate a single model.
 
-    key: str
-    name: str
-    factory: Callable[[float], object]
-    modes: tuple[str, ...] = ("OSA", "FR")
+    Returns
+    -------
+    dict
+        ``{"model_name": str, "metrics": {...}, "train_time": float,
+          "model": BaseModel}``
+    """
+    overrides = config_overrides or {}
+    if verbose:
+        overrides.setdefault("verbose", True)
 
+    try:
+        model = build_model(model_name, **overrides)
+    except KeyError as exc:
+        return {
+            "model_name": model_name,
+            "metrics": None,
+            "train_time": 0.0,
+            "error": str(exc),
+            "model": None,
+        }
 
-@dataclass(frozen=True)
-class BenchmarkConfig:
-    """Dataset and split settings used for all benchmark cases."""
+    t0 = time.time()
+    try:
+        model.fit(train_data, val_data=val_data, logger=logger)
+    except Exception as exc:
+        return {
+            "model_name": model_name,
+            "metrics": None,
+            "train_time": time.time() - t0,
+            "error": str(exc),
+            "model": None,
+        }
+    train_time = time.time() - t0
 
-    datasets: tuple[str, ...] = ("multisine_05",)
-    preprocess: bool = True
-    resample_factor: int = 50
-    train_ratio: float = 0.8
-    end_ref_tolerance: float = 1e-8
-    output_json: str = "benchmark_results.json"
-
-
-def _base_case_factories() -> dict[str, BenchmarkCase]:
-    """Canonical benchmark cases with balanced runtime and model diversity."""
-
-    def _make_model(key: str, **config_overrides):
-        model_cls = get_model_class(key)
-        config_cls = get_model_config_class(key)
-        return model_cls(config_cls(**config_overrides))
+    try:
+        y_pred = model.predict(test_data[0], test_data[1], mode="FR")
+        skip = getattr(model, "max_lag", 0)
+        metrics = compute_all(test_data[1], y_pred, skip=skip)
+    except Exception as exc:
+        return {
+            "model_name": model_name,
+            "metrics": None,
+            "train_time": train_time,
+            "error": str(exc),
+            "model": model,
+        }
 
     return {
-        "narx": BenchmarkCase(
-            key="narx",
-            name="NARX",
-            factory=lambda dt: _make_model(
-                "narx", nu=10, ny=10, poly_order=2, selection_criteria=10
-            ),
-        ),
-        "random_forest": BenchmarkCase(
-            key="random_forest",
-            name="RandomForest",
-            factory=lambda dt: _make_model(
-                "random_forest",
-                nu=10,
-                ny=10,
-                n_estimators=100,
-                max_depth=12,
-                random_state=42,
-            ),
-        ),
-        "neural_ode": BenchmarkCase(
-            key="neural_ode",
-            name="NeuralODE",
-            factory=lambda dt: _make_model(
-                "neural_ode",
-                state_dim=1,
-                input_dim=1,
-                hidden_layers=[64, 64],
-                dt=dt,
-                solver="rk4",
-                learning_rate=1e-3,
-                epochs=1000,
-                sequence_length=50,
-                activation="selu",
-                training_mode="full",
-            ),
-        ),
-        "neural_sde": BenchmarkCase(
-            key="neural_sde",
-            name="NeuralSDE",
-            factory=lambda dt: _make_model(
-                "neural_sde",
-                state_dim=1,
-                input_dim=1,
-                hidden_layers=[64, 64],
-                diffusion_hidden_layers=[64, 64],
-                dt=dt,
-                solver="euler",
-                learning_rate=1e-3,
-                epochs=1000,
-                sequence_length=50,
-            ),
-        ),
-        "neural_cde": BenchmarkCase(
-            key="neural_cde",
-            name="NeuralCDE",
-            factory=lambda dt: _make_model(
-                "neural_cde",
-                hidden_dim=32,
-                input_dim=2,
-                hidden_layers=[64, 64],
-                interpolation="cubic",
-                solver="rk4",
-                learning_rate=1e-3,
-                epochs=1000,
-                sequence_length=50,
-            ),
-        ),
-        "linear_physics": BenchmarkCase(
-            key="linear_physics",
-            name="LinearPhysics",
-            factory=lambda dt: _make_model(
-                "linear_physics",
-                dt=dt,
-                learning_rate=1e-3,
-                epochs=1000,
-            ),
-        ),
-        "stribeck_physics": BenchmarkCase(
-            key="stribeck_physics",
-            name="StribeckPhysics",
-            factory=lambda dt: _make_model(
-                "stribeck_physics",
-                dt=dt,
-                learning_rate=1e-3,
-                epochs=1000,
-            ),
-        ),
-        "lstm": BenchmarkCase(
-            key="lstm",
-            name="LSTM",
-            factory=lambda dt: _make_model(
-                "lstm",
-                nu=10,
-                ny=10,
-                hidden_size=64,
-                num_layers=2,
-                dropout=0.1,
-                learning_rate=1e-3,
-                epochs=200,
-                batch_size=32,
-            ),
-        ),
-        "tcn": BenchmarkCase(
-            key="tcn",
-            name="TCN",
-            factory=lambda dt: _make_model(
-                "tcn",
-                nu=10,
-                ny=10,
-                num_channels=[64, 64, 64, 64],
-                kernel_size=3,
-                dropout=0.1,
-                learning_rate=1e-3,
-                epochs=200,
-                batch_size=32,
-            ),
-        ),
-        "ude": BenchmarkCase(
-            key="ude",
-            name="UDE",
-            factory=lambda dt: _make_model(
-                "ude",
-                dt=dt,
-                hidden_layers=[64, 64],
-                learning_rate=1e-3,
-                epochs=1000,
-                sequence_length=50,
-                training_mode="full",
-            ),
-        ),
-        "mamba": BenchmarkCase(
-            key="mamba",
-            name="Mamba",
-            factory=lambda dt: _make_model(
-                "mamba",
-                nu=10,
-                ny=10,
-                d_model=64,
-                d_state=16,
-                d_conv=4,
-                n_layers=2,
-                expand_factor=2,
-                dropout=0.1,
-                learning_rate=1e-3,
-                epochs=200,
-                batch_size=32,
-            ),
-        ),
-        "gru": BenchmarkCase(
-            key="gru",
-            name="GRU",
-            factory=lambda dt: _make_model(
-                "gru",
-                nu=10,
-                ny=10,
-                hidden_size=64,
-                num_layers=2,
-                dropout=0.1,
-                learning_rate=1e-3,
-                epochs=200,
-                batch_size=32,
-            ),
-        ),
-        "neural_network": BenchmarkCase(
-            key="neural_network",
-            name="Neural Network",
-            factory=lambda dt: _make_model(
-                "neural_network",
-                nu=10,
-                ny=10,
-                hidden_layers=[80, 80, 80],
-                activation="selu",
-                learning_rate=1e-3,
-                epochs=200,
-                batch_size=32,
-            ),
-        ),
-        "vanilla_node_2d": BenchmarkCase(
-            key="vanilla_node_2d",
-            name="VanillaNODE2D",
-            factory=lambda dt: _make_model(
-                "vanilla_node_2d",
-                hidden_dim=128,
-                dt=dt,
-                solver="rk4",
-                learning_rate=0.01,
-                epochs=5000,
-                k_steps=20,
-                batch_size=128,
-            ),
-        ),
-        "structured_node": BenchmarkCase(
-            key="structured_node",
-            name="StructuredNODE",
-            factory=lambda dt: _make_model(
-                "structured_node",
-                hidden_dim=128,
-                dt=dt,
-                solver="rk4",
-                learning_rate=0.01,
-                epochs=5000,
-                k_steps=20,
-                batch_size=128,
-            ),
-        ),
-        "adaptive_node": BenchmarkCase(
-            key="adaptive_node",
-            name="AdaptiveNODE",
-            factory=lambda dt: _make_model(
-                "adaptive_node",
-                hidden_dim=128,
-                dt=dt,
-                solver="rk4",
-                learning_rate=0.005,
-                epochs=5000,
-                k_steps=20,
-                batch_size=128,
-            ),
-        ),
+        "model_name": model_name,
+        "metrics": metrics,
+        "train_time": train_time,
+        "model": model,
     }
 
 
-def build_benchmark_cases(selected: Iterable[str] | None = None) -> list[BenchmarkCase]:
-    """Resolve benchmark cases by key."""
-    cases = _base_case_factories()
-    if selected is None:
-        return list(cases.values())
+def run_all_benchmarks(
+    dataset: Dataset,
+    *,
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.15,
+    model_names: List[str] | None = None,
+    config_overrides: Dict[str, Any] | None = None,
+    save_dir: Optional[str] = None,
+    logger_factory=None,
+    verbose: bool = True,
+) -> List[Dict[str, Any]]:
+    """Run benchmarks for all (or selected) registered models.
 
-    resolved: list[BenchmarkCase] = []
-    unknown = []
-    for key in selected:
-        norm = key.strip().lower()
-        if norm not in cases:
-            unknown.append(norm)
-            continue
-        resolved.append(cases[norm])
-    if unknown:
-        available = ", ".join(sorted(cases))
-        names = ", ".join(sorted(set(unknown)))
-        raise ValueError(f"Unknown benchmark case(s): {names}. Available: {available}")
-    return resolved
+    Parameters
+    ----------
+    dataset : Dataset
+        The full dataset.
+    train_ratio, val_ratio : float
+        Split ratios.
+    model_names : list | None
+        Subset of model names; defaults to all registered.
+    config_overrides : dict | None
+        Overrides applied to every model's config.
+    save_dir : str | None
+        Directory to persist trained models.
+    logger_factory : callable | None
+        ``logger_factory(model_name) → WandbLogger`` or similar.
+    verbose : bool
 
+    Returns
+    -------
+    list[dict]
+        One result dict per model.
+    """
+    train_ds, val_ds, test_ds = dataset.train_val_test_split(
+        train_ratio, val_ratio
+    )
 
-class BenchmarkRunner:
-    """Runs full benchmark and emits structured results."""
+    names = model_names or list_models()
+    overrides = config_overrides or {}
+    results: List[Dict[str, Any]] = []
 
-    def __init__(self, cases: list[BenchmarkCase], config: BenchmarkConfig):
-        if not cases:
-            raise ValueError("At least one benchmark case is required")
-        self.cases = cases
-        self.config = config
+    for name in names:
+        if verbose:
+            print(f"\n{'=' * 50}")
+            print(f"Benchmarking: {name}")
+            print(f"{'=' * 50}")
 
-    @staticmethod
-    def _fit_model(model, u, y, wandb_run=None):
-        """Call model.fit using the unified BaseModel interface."""
-        del wandb_run  # logging is configured through model config
-        model.fit((u, y))
+        logger = logger_factory(name) if logger_factory else None
 
-    @staticmethod
-    def _evaluate_mode(model, mode: str, test_ds: Dataset) -> tuple[dict[str, float], int]:
-        mode = mode.upper()
-        if mode not in {"OSA", "FR"}:
-            raise ValueError(f"Unsupported mode: {mode}")
+        result = run_single_benchmark(
+            name,
+            train_data=(train_ds.u, train_ds.y),
+            test_data=(test_ds.u, test_ds.y),
+            val_data=(val_ds.u, val_ds.y),
+            config_overrides=overrides,
+            logger=logger,
+            verbose=verbose,
+        )
+        results.append(result)
 
-        if mode == "OSA":
-            y_pred = model.predict(test_ds.u, test_ds.y, mode="OSA")
-        else:
-            y_init = test_ds.y[: model.max_lag]
-            y_pred = model.predict(test_ds.u, y_init, mode="FR")
+        if result["metrics"]:
+            if verbose:
+                skip = getattr(result["model"], "max_lag", 0)
+                y_pred = result["model"].predict(test_ds.u, test_ds.y, mode="FR")
+                print(summary(test_ds.y, y_pred, name, skip=skip))
+        elif verbose:
+            print(f"  ERROR: {result.get('error', 'unknown')}")
 
-        y_true = test_ds.y[model.max_lag :]
-        metrics = Metrics.compute_all(y_true, y_pred)
-        return metrics, len(y_pred)
+        if save_dir and result["model"] is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            result["model"].save(os.path.join(save_dir, f"{name}.pkl"))
 
-    def run(self, wandb_run=None) -> list[dict[str, float | int | str]]:
-        """Execute all benchmark cases on all datasets."""
-        rows: list[dict[str, float | int | str]] = []
-
-        for dataset_name in self.config.datasets:
-            ds = Dataset.from_bab_experiment(
-                dataset_name,
-                preprocess=self.config.preprocess,
-                resample_factor=self.config.resample_factor,
-                end_ref_tolerance=self.config.end_ref_tolerance,
-            )
-            train_ds, test_ds = ds.split(self.config.train_ratio)
-            dt = 1.0 / ds.sampling_rate
-
-            if wandb_run is not None:
-                wandb_run.log(
-                    {
-                        "dataset/samples": len(ds),
-                        "dataset/train_samples": len(train_ds),
-                        "dataset/test_samples": len(test_ds),
-                        "dataset/sampling_rate_hz": ds.sampling_rate,
-                    }
-                )
-
-            for case_idx, case in enumerate(self.cases, 1):
-                print(
-                    f"\n{'='*60}\n"
-                    f"[{case_idx}/{len(self.cases)}] Training {case.name} ..."
-                    f"\n{'='*60}"
-                )
-                model = case.factory(dt)
-                t0 = time.perf_counter()
-                try:
-                    self._fit_model(model, train_ds.u, train_ds.y, wandb_run=wandb_run)
-                    fit_seconds = time.perf_counter() - t0
-                    print(f"[{case.name}] Training done in {fit_seconds:.1f}s")
-                except Exception as exc:
-                    fit_seconds = time.perf_counter() - t0
-                    rows.append(
-                        {
-                            "dataset": dataset_name,
-                            "model": case.name,
-                            "mode": "ERROR",
-                            "fit_seconds": fit_seconds,
-                            "n_predictions": 0,
-                            "MSE": np.nan,
-                            "RMSE": np.nan,
-                            "MAE": np.nan,
-                            "R2": np.nan,
-                            "NRMSE": np.nan,
-                            "FIT%": np.nan,
-                            "error": str(exc),
-                        }
-                    )
-                    print(f"[benchmark] Skipping {case.name}: {exc}")
-                    continue
-
-                for mode in case.modes:
-                    try:
-                        metrics, n_pred = self._evaluate_mode(model, mode, test_ds)
-                        row = {
-                            "dataset": dataset_name,
-                            "model": case.name,
-                            "mode": mode.upper(),
-                            "fit_seconds": fit_seconds,
-                            "n_predictions": n_pred,
-                            **metrics,
-                        }
-                        rows.append(row)
-
-                        if wandb_run is not None:
-                            wandb_run.log(
-                                {
-                                    "benchmark/fit_seconds": fit_seconds,
-                                    "benchmark/n_predictions": n_pred,
-                                    **{
-                                        f"benchmark/{mode.lower()}/{k.lower()}": v
-                                        for k, v in metrics.items()
-                                    },
-                                }
-                            )
-                    except Exception as exc:
-                        rows.append(
-                            {
-                                "dataset": dataset_name,
-                                "model": case.name,
-                                "mode": f"{mode.upper()}_ERROR",
-                                "fit_seconds": fit_seconds,
-                                "n_predictions": 0,
-                                "MSE": np.nan,
-                                "RMSE": np.nan,
-                                "MAE": np.nan,
-                                "R2": np.nan,
-                                "NRMSE": np.nan,
-                                "FIT%": np.nan,
-                                "error": str(exc),
-                            }
-                        )
-                        print(f"[benchmark] {case.name} {mode.upper()} failed: {exc}")
-
-        if wandb_run is not None and rows:
+        if logger is not None:
             try:
-                import wandb
-
-                columns = sorted({key for row in rows for key in row.keys()})
-                table = wandb.Table(columns=columns)
-                for row in rows:
-                    table.add_data(*[row.get(c) for c in columns])
-                wandb_run.log({"benchmark/results_table": table})
+                logger.finish()
             except Exception:
                 pass
 
-        return rows
+    return results
 
-    def run_and_save(self, wandb_run=None) -> list[dict[str, float | int | str]]:
-        """Run benchmark and persist result rows as JSON."""
-        rows = self.run(wandb_run=wandb_run)
-        output_path = Path(self.config.output_json)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "config": asdict(self.config),
-            "cases": [case.key for case in self.cases],
-            "results": rows,
+
+def results_to_json(results: List[Dict[str, Any]], filepath: str) -> None:
+    """Save benchmark results to JSON (excluding model objects)."""
+    serialisable = []
+    for r in results:
+        entry = {
+            "model_name": r["model_name"],
+            "metrics": r.get("metrics"),
+            "train_time": r.get("train_time"),
         }
-        output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        return rows
-
-
-def summarize_results(
-    rows: list[dict[str, float | int | str]],
-    mode: str = "FR",
-    metric: str = "FIT%",
-) -> list[dict[str, float | int | str]]:
-    """Return leaderboard rows sorted by metric for one prediction mode."""
-    filtered = []
-    for row in rows:
-        if str(row.get("mode", "")).upper() != mode.upper():
-            continue
-        value = row.get(metric, np.nan)
-        if isinstance(value, (int, float)) and np.isfinite(float(value)):
-            filtered.append(row)
-    return sorted(filtered, key=lambda row: float(row.get(metric, 0.0)), reverse=True)
+        if "error" in r:
+            entry["error"] = r["error"]
+        serialisable.append(entry)
+    os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+    with open(filepath, "w") as f:
+        json.dump(serialisable, f, indent=2)

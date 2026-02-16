@@ -1,18 +1,13 @@
 """Benchmarking utilities."""
 
 from .runner import (
-    BenchmarkCase,
-    BenchmarkConfig,
-    BenchmarkRunner,
-    build_benchmark_cases,
-    summarize_results,
+    results_to_json,
+    run_all_benchmarks,
+    run_single_benchmark,
 )
 
 __all__ = [
-    "BenchmarkCase",
-    "BenchmarkConfig",
-    "BenchmarkRunner",
-    "build_benchmark_cases",
-    "summarize_results",
+    "run_single_benchmark",
+    "run_all_benchmarks",
+    "results_to_json",
 ]
-

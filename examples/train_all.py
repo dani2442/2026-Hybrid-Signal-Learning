@@ -1,174 +1,73 @@
-#!/usr/bin/env python
-"""Train all models on a dataset and compare results.
+"""Train all registered models and save benchmark results.
 
-Usage::
+Usage
+-----
+::
 
-    python examples/train_all.py
-    python examples/train_all.py --dataset swept_sine --wandb my-project
+    python -m examples.train_all --dataset multisine_05
 """
 
 from __future__ import annotations
 
 import argparse
-import json
+import os
 import sys
-from pathlib import Path
 
-import numpy as np
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.benchmarking import results_to_json, run_all_benchmarks
+from src.data import from_bab_experiment
+from src.models import list_models
+from src.utils.runtime import seed_all
 
-from src.data import Dataset
-from src.models.registry import (
-    get_model_class,
-    get_model_config_class,
-    list_model_keys,
-)
-from src.validation import Metrics
-from src.visualization import plot_predictions
-from src.utils import ensure_proxy_env
 
-# Models that work out-of-the-box on the BAB (2-D rotary beam) data.
-# Excludes hybrid_nonlinear_cam which requires cam-specific geometry.
-DEFAULT_MODELS: list[str] = [
-    "narx",
-    "arima",
-    "exponential_smoothing",
-    "random_forest",
-    "neural_network",
-    "gru",
-    "lstm",
-    "tcn",
-    # "mamba",            # uncomment if mamba-ssm is installed
-    "neural_ode",
-    "neural_sde",
-    "neural_cde",
-    "linear_physics",
-    "stribeck_physics",
-    "hybrid_linear_beam",
-    "ude",
-    "vanilla_node_2d",
-    "structured_node",
-    "adaptive_node",
-    "vanilla_ncde_2d",
-    "structured_ncde",
-    "adaptive_ncde",
-    "vanilla_nsde_2d",
-    "structured_nsde",
-    "adaptive_nsde",
-]
-def main():
-    parser = argparse.ArgumentParser(description="Train all models and compare.")
-    parser.add_argument("--dataset", default="multisine_05")
-    parser.add_argument("--wandb", default=None, help="W&B project name")
-    parser.add_argument("--out-dir", default="checkpoints")
-    parser.add_argument(
-        "--device",
-        default="auto",
-        help="Runtime device: auto | cpu | cuda | cuda:N (default: auto)",
-    )
-    parser.add_argument(
-        "--models",
-        nargs="*",
-        default=None,
-        help="Subset of model names to train (default: all in DEFAULT_MODELS)",
-    )
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Benchmark all models")
+    parser.add_argument("--dataset", type=str, default="multisine_05")
+    parser.add_argument("--train-ratio", type=float, default=0.7)
+    parser.add_argument("--val-ratio", type=float, default=0.15)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--models", type=str, nargs="*", default=None,
+                        help="Subset of model names (default: all)")
+    parser.add_argument("--save-dir", type=str, default="trained_models")
+    parser.add_argument("--results-file", type=str, default="benchmark_results.json")
     args = parser.parse_args()
 
-    ensure_proxy_env()
+    seed_all(args.seed)
+    ds = from_bab_experiment(args.dataset)
 
-    available_models = set(list_model_keys())
-    model_names = args.models or DEFAULT_MODELS
+    print(f"Dataset: {ds.name}  ({ds.n_samples} samples)")
+    print(f"Available models: {list_models()}")
 
-    # ── Data ──────────────────────────────────────────────────────────
-    ds = Dataset.from_bab_experiment(args.dataset)
-    train_ds, val_ds, test_ds = ds.train_val_test_split(train=0.7, val=0.15)
-    print(
-        f"Dataset: {ds.name}  "
-        f"({len(train_ds)} train / {len(val_ds)} val / {len(test_ds)} test)\n"
+    overrides = {"seed": args.seed}
+    if args.epochs is not None:
+        overrides["epochs"] = args.epochs
+
+    results = run_all_benchmarks(
+        ds,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        model_names=args.models,
+        config_overrides=overrides,
+        save_dir=args.save_dir,
     )
 
-    out_dir = Path(args.out_dir)
-    results: dict[str, dict[str, float]] = {}
-    predictions_osa: dict[str, np.ndarray] = {}
-    predictions_fr: dict[str, np.ndarray] = {}
-
-    for name in model_names:
-        if name not in available_models:
-            print(f"⚠  Unknown model '{name}', skipping.")
-            continue
-
-        config = get_model_config_class(name)()
-        config.device = args.device
-        if args.wandb:
-            config.wandb_project = args.wandb
-            config.wandb_run_name = f"{name}_{args.dataset}"
-
-        model_cls = get_model_class(name)
-        model = model_cls(config)
-        print(f"{'─' * 60}\nTraining {model!r}")
-
-        try:
-            model.fit(train_ds.arrays, val_data=val_ds.arrays)
-        except Exception as exc:
-            print(f"  ✗ {name} failed: {exc}\n")
-            continue
-
-        # Evaluate on test set
-        y_osa = model.predict(test_ds.u, test_ds.y, mode="OSA")
-        y_fr = model.predict(test_ds.u, test_ds.y, mode="FR")
-
-        metrics_osa = Metrics.compute_all(test_ds.y, y_osa)
-        metrics_fr = Metrics.compute_all(test_ds.y, y_fr)
-
-        results[name] = {"osa": metrics_osa, "fr": metrics_fr}
-        predictions_osa[name] = y_osa
-        predictions_fr[name] = y_fr
-
-        print(f"  OSA R²={metrics_osa['R2']:.4f}  FIT={metrics_osa['FIT%']:.2f}")
-        print(f"  FR  R²={metrics_fr['R2']:.4f}  FIT={metrics_fr['FIT%']:.2f}\n")
-
-        # Save checkpoint
-        model.save(out_dir / f"{name}_{args.dataset}.pt")
-
-    # ── Summary ───────────────────────────────────────────────────────
+    # Summary
     print(f"\n{'=' * 60}")
-    print(f"{'Model':<25} {'OSA R²':>8} {'FR R²':>8} {'FR FIT%':>9}")
-    print(f"{'─' * 60}")
-    for name, m in results.items():
-        print(
-            f"{name:<25} {m['osa']['R2']:>8.4f} {m['fr']['R2']:>8.4f} "
-            f"{m['fr']['FIT%']:>8.2f}"
-        )
+    print("BENCHMARK SUMMARY")
     print(f"{'=' * 60}")
+    for r in results:
+        name = r["model_name"]
+        if r["metrics"]:
+            print(f"  {name:30s}  RMSE={r['metrics']['RMSE']:.6f}  "
+                  f"FIT={r['metrics']['FIT']:.4f}  "
+                  f"t={r['train_time']:.1f}s")
+        else:
+            print(f"  {name:30s}  ERROR: {r.get('error', 'unknown')}")
 
-    # Save results JSON
-    out_dir.mkdir(parents=True, exist_ok=True)
-    results_path = out_dir / f"results_{args.dataset}.json"
-    with open(results_path, "w") as f:
-        json.dump(results, f, indent=2)
-    print(f"\nResults saved → {results_path}")
-
-    # ── Comparison plot ───────────────────────────────────────────────
-    plot_dir = Path("plots")
-    plot_dir.mkdir(exist_ok=True)
-    if predictions_fr:
-        plot_predictions(
-            test_ds.t,
-            test_ds.y,
-            predictions_fr,
-            title=f"Free-run comparison – {args.dataset}",
-            save_path=str(plot_dir / f"comparison_fr_{args.dataset}.png"),
-        )
-    if predictions_osa:
-        plot_predictions(
-            test_ds.t,
-            test_ds.y,
-            predictions_osa,
-            title=f"OSA comparison – {args.dataset}",
-            save_path=str(plot_dir / f"comparison_osa_{args.dataset}.png"),
-        )
+    results_to_json(results, args.results_file)
+    print(f"\nResults saved to {args.results_file}")
 
 
 if __name__ == "__main__":

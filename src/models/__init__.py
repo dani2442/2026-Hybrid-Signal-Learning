@@ -1,52 +1,45 @@
-"""System Identification Models."""
+"""Model package — importing sub-packages triggers registration."""
 
-from .base import BaseModel
-from .narx import NARX
-from .arima import ARIMA
-from .neural_network import NeuralNetwork
-from .neural_ode import NeuralODE
-from .neural_sde import NeuralSDE
-from .neural_cde import NeuralCDE
-from .exponential_smoothing import ExponentialSmoothing
-from .random_forest import RandomForest
-from .gru import GRU
-from .lstm import LSTM
-from .tcn import TCN
-from .ude import UDE
-from .mamba import Mamba
-from .hybrid_linear_beam import HybridLinearBeam
-from .hybrid_nonlinear_cam import HybridNonlinearCam
-from .physics_ode import LinearPhysics, StribeckPhysics
-from .blackbox_ode import VanillaNODE2D, StructuredNODE, AdaptiveNODE
-from .blackbox_cde import VanillaNCDE2D, StructuredNCDE, AdaptiveNCDE
-from .blackbox_sde import VanillaNSDE2D, StructuredNSDE, AdaptiveNSDE
+# Import sub-packages so @register_model decorators execute
+from src.models import classical  # noqa: F401
+from src.models import feedforward  # noqa: F401
+from src.models import sequence  # noqa: F401
+
+# Continuous/hybrid/blackbox have optional deps — guard imports
+try:
+    from src.models import continuous  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    from src.models import hybrid  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    from src.models import blackbox  # noqa: F401
+except ImportError:
+    pass
+
+# Re-export key infrastructure
+from src.models.base import BaseModel, PickleStateMixin, load_model
+from src.models.registry import (
+    build_model,
+    get_config_class,
+    get_model_class,
+    is_registered,
+    list_models,
+    register_model,
+)
 
 __all__ = [
     "BaseModel",
-    "NARX",
-    "ARIMA",
-    "NeuralNetwork",
-    "NeuralODE",
-    "NeuralSDE",
-    "NeuralCDE",
-    "ExponentialSmoothing",
-    "RandomForest",
-    "GRU",
-    "LSTM",
-    "TCN",
-    "UDE",
-    "Mamba",
-    "HybridLinearBeam",
-    "HybridNonlinearCam",
-    "LinearPhysics",
-    "StribeckPhysics",
-    "VanillaNODE2D",
-    "StructuredNODE",
-    "AdaptiveNODE",
-    "VanillaNCDE2D",
-    "StructuredNCDE",
-    "AdaptiveNCDE",
-    "VanillaNSDE2D",
-    "StructuredNSDE",
-    "AdaptiveNSDE",
+    "PickleStateMixin",
+    "load_model",
+    "build_model",
+    "get_config_class",
+    "get_model_class",
+    "is_registered",
+    "list_models",
+    "register_model",
 ]

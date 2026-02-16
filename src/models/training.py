@@ -1,94 +1,509 @@
-"""Shared supervised training loops for torch models."""
+"""Shared training utilities for PyTorch-based models.
+
+Provides composable building blocks (optimizer setup, scheduler, early
+stopping, gradient clipping) and a *generic training loop* that every
+neural model can call with a custom ``step_fn``.
+"""
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Sequence
+import math
+from typing import Callable, Iterable, List, Optional
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+from src.config import BaseConfig
+from src.models.constants import DEFAULT_GRAD_CLIP
 
 
-def _clone_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
-    return {k: v.detach().clone() for k, v in state_dict.items()}
+# ─────────────────────────────────────────────────────────────────────
+# Small helpers
+# ─────────────────────────────────────────────────────────────────────
+
+def inverse_softplus(x: float) -> float:
+    """Inverse of ``softplus(x) = log(1 + exp(x))``.
+
+    Used by hybrid models to initialise raw parameters so that
+    ``softplus(raw)`` yields a desired positive value.
+    """
+    if x <= 0:
+        raise ValueError(f"inverse_softplus requires x > 0, got {x}")
+    return math.log(math.exp(x) - 1)
 
 
-def train_supervised_torch_model(
-    model,
-    optimizer,
-    criterion,
-    train_loader,
+def gradient_norm(parameters: Iterable[nn.Parameter]) -> float:
+    """Return total ℓ₂ gradient norm across all parameters."""
+    total = 0.0
+    for p in parameters:
+        if p.grad is not None:
+            total += p.grad.data.norm(2).item() ** 2
+    return total ** 0.5
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Optimizer / scheduler / early-stopping factories
+# ─────────────────────────────────────────────────────────────────────
+
+def make_optimizer(
+    params: Iterable[nn.Parameter],
+    lr: float = 1e-3,
+) -> torch.optim.Adam:
+    """Create an Adam optimiser."""
+    return torch.optim.Adam(params, lr=lr)
+
+
+def make_scheduler(
+    optimizer: torch.optim.Optimizer,
+    patience: int = 200,
+    factor: float = 0.5,
+    min_lr: float = 1e-6,
+) -> ReduceLROnPlateau:
+    """Create a ReduceLROnPlateau scheduler."""
+    return ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        patience=patience,
+        factor=factor,
+        min_lr=min_lr,
+    )
+
+
+class EarlyStopper:
+    """Tracks validation loss and signals when to stop.
+
+    Parameters
+    ----------
+    patience : int | None
+        Number of epochs without improvement to tolerate.
+        ``None`` disables early stopping.
+    """
+
+    def __init__(self, patience: Optional[int] = None) -> None:
+        self.patience = patience
+        self.best_loss = float("inf")
+        self.counter = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self.patience is not None and self.patience > 0
+
+    def step(self, loss: float) -> bool:
+        """Return *True* if training should stop."""
+        if not self.enabled:
+            return False
+        if loss < self.best_loss:
+            self.best_loss = loss
+            self.counter = 0
+            return False
+        self.counter += 1
+        return self.counter >= self.patience
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Generic training loop
+# ─────────────────────────────────────────────────────────────────────
+
+def train_loop(
+    step_fn: Callable[[int], float],
+    *,
     epochs: int,
-    verbose: bool,
-    progress_desc: str,
-    forward_fn: Callable[[Any], Any],
-    val_loader=None,
-    grad_clip_norm: Optional[float] = None,
-    early_stopping_patience: Optional[int] = None,
-    logger: Any = None,
+    optimizer: torch.optim.Optimizer | None = None,
+    scheduler: ReduceLROnPlateau | None = None,
+    early_stopper: EarlyStopper | None = None,
+    logger=None,
     log_every: int = 1,
-) -> Sequence[float]:
-    """Train a torch model with optional validation and early stopping."""
-    import torch
-    from tqdm.auto import tqdm
+    verbose: bool = True,
+    desc: str = "Training",
+) -> List[float]:
+    """Run a generic epoch loop.
 
-    history: list[float] = []
-    best_loss = float("inf")
-    best_state = None
-    patience_counter = 0
-    patience = early_stopping_patience or float("inf")
+    Parameters
+    ----------
+    step_fn : callable(epoch) -> float
+        Must execute one epoch and return the loss.  The function is
+        responsible for forward, backward, and ``optimizer.step()``.
+    epochs : int
+        Maximum number of epochs.
+    optimizer : Optimizer | None
+        If provided, ``scheduler`` will inspect it for lr.
+    scheduler : ReduceLROnPlateau | None
+        Stepped every epoch with the loss.
+    early_stopper : EarlyStopper | None
+        Checked every epoch.
+    logger : WandbLogger | None
+        Receives ``loss`` and ``lr`` per epoch.
+    log_every : int
+        Log every N epochs.
+    verbose : bool
+        Show tqdm progress bar.
+    desc : str
+        Label for the progress bar.
 
-    epoch_iter = range(int(epochs))
-    if verbose:
-        epoch_iter = tqdm(epoch_iter, desc=progress_desc, unit="epoch")
+    Returns
+    -------
+    list[float]
+        Per-epoch loss values.
+    """
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        tqdm = None
 
-    for epoch in epoch_iter:
-        model.train()
-        epoch_loss = 0.0
-        for bx, by in train_loader:
-            optimizer.zero_grad()
-            pred = forward_fn(bx)
-            loss = criterion(pred.squeeze(), by)
-            loss.backward()
-            if grad_clip_norm is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
-            optimizer.step()
-            epoch_loss += float(loss.item())
-        avg_train = epoch_loss / len(train_loader)
-        history.append(avg_train)
+    losses: List[float] = []
+    iterator = range(epochs)
+    pbar = tqdm(iterator, desc=desc, disable=not verbose) if tqdm else iterator
 
-        avg_val = None
-        if val_loader is not None:
-            model.eval()
-            val_loss = 0.0
-            with torch.no_grad():
-                for bx, by in val_loader:
-                    pred = forward_fn(bx)
-                    val_loss += float(criterion(pred.squeeze(), by).item())
-            avg_val = val_loss / len(val_loader)
+    for epoch in pbar:
+        loss = step_fn(epoch)
+        losses.append(loss)
 
-        monitor = avg_val if avg_val is not None else avg_train
-        if monitor < best_loss:
-            best_loss = monitor
-            best_state = _clone_state_dict(model.state_dict())
-            patience_counter = 0
-        else:
-            patience_counter += 1
+        if scheduler is not None:
+            scheduler.step(loss)
 
-        if verbose and hasattr(epoch_iter, "set_postfix"):
-            postfix = {"loss": avg_train}
-            if avg_val is not None:
-                postfix["val"] = avg_val
-            epoch_iter.set_postfix(postfix)
-
-        if logger and logger.active and (epoch + 1) % int(log_every) == 0:
-            payload = {"train/loss": avg_train, "train/epoch": epoch + 1}
-            if avg_val is not None:
-                payload["val/loss"] = avg_val
-            logger.log_metrics(payload, step=epoch + 1)
-
-        if patience_counter >= patience:
-            if verbose:
-                print(f"Early stopping at epoch {epoch + 1}")
+        if early_stopper is not None and early_stopper.step(loss):
+            if verbose and tqdm is not None:
+                pbar.set_postfix(loss=f"{loss:.6f}", status="early_stop")
             break
 
-    if best_state is not None:
-        model.load_state_dict(best_state)
+        if verbose and tqdm is not None and hasattr(pbar, "set_postfix"):
+            lr_str = ""
+            if optimizer is not None:
+                lr_str = f"{optimizer.param_groups[0]['lr']:.2e}"
+            pbar.set_postfix(loss=f"{loss:.6f}", lr=lr_str)
 
-    return history
+        if logger is not None and (epoch + 1) % log_every == 0:
+            metrics = {"loss": loss, "epoch": epoch}
+            if optimizer is not None:
+                metrics["lr"] = optimizer.param_groups[0]["lr"]
+            logger.log_metrics(metrics, step=epoch)
+
+    return losses
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Supervised training (NARX-like / feedforward)
+# ─────────────────────────────────────────────────────────────────────
+
+def train_supervised_torch_model(
+    model: nn.Module,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    *,
+    config: BaseConfig,
+    logger=None,
+    device: str = "cpu",
+) -> List[float]:
+    """Batch-SGD training for feed-forward PyTorch models.
+
+    Parameters
+    ----------
+    model : nn.Module
+        The network to train.
+    X_train, y_train : np.ndarray
+        Feature matrix and targets.
+    config : BaseConfig
+        Must have ``learning_rate``, ``epochs``, ``batch_size``,
+        ``grad_clip``, ``scheduler_*``, ``early_stopping_patience``,
+        ``verbose``.
+    logger : WandbLogger | None
+    device : str
+
+    Returns
+    -------
+    list[float]
+        Per-epoch training losses.
+    """
+    X_t = torch.tensor(X_train, dtype=torch.float32, device=device)
+    y_t = torch.tensor(y_train, dtype=torch.float32, device=device).unsqueeze(-1)
+    dataset = torch.utils.data.TensorDataset(X_t, y_t)
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size=config.batch_size, shuffle=True
+    )
+
+    model.to(device)
+    optimizer = make_optimizer(model.parameters(), lr=config.learning_rate)
+    scheduler = make_scheduler(
+        optimizer,
+        patience=config.scheduler_patience,
+        factor=config.scheduler_factor,
+        min_lr=config.scheduler_min_lr,
+    )
+    stopper = EarlyStopper(config.early_stopping_patience)
+    criterion = nn.MSELoss()
+
+    def step_fn(_epoch: int) -> float:
+        model.train()
+        total_loss = 0.0
+        n_batches = 0
+        for xb, yb in loader:
+            optimizer.zero_grad()
+            pred = model(xb)
+            loss = criterion(pred, yb)
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+            optimizer.step()
+            total_loss += loss.item()
+            n_batches += 1
+        return total_loss / max(n_batches, 1)
+
+    return train_loop(
+        step_fn,
+        epochs=config.epochs,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        early_stopper=stopper,
+        logger=logger,
+        log_every=getattr(config, "wandb_log_every", 1),
+        verbose=config.verbose,
+        desc=f"Training (supervised)",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Sequence training (GRU / LSTM / TCN / Mamba)
+# ─────────────────────────────────────────────────────────────────────
+
+def create_sequence_dataset(
+    u: np.ndarray,
+    y: np.ndarray,
+    window_size: int,
+) -> torch.utils.data.TensorDataset:
+    """Create sliding-window ``TensorDataset`` for sequence models.
+
+    Parameters
+    ----------
+    u, y : np.ndarray
+        1-D signals.
+    window_size : int
+        Sub-sequence length.
+
+    Returns
+    -------
+    TensorDataset
+        Pairs of ``(u_window, y_window)`` with shape ``(window, 1)``.
+    """
+    u = np.asarray(u, dtype=np.float32).ravel()
+    y = np.asarray(y, dtype=np.float32).ravel()
+    n = len(u)
+
+    if n < window_size:
+        # If signal is shorter than window, use full signal as one sample
+        u_t = torch.tensor(u, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
+        y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
+        return torch.utils.data.TensorDataset(u_t, y_t)
+
+    n_windows = n - window_size + 1
+    u_windows = np.lib.stride_tricks.sliding_window_view(u, window_size)
+    y_windows = np.lib.stride_tricks.sliding_window_view(y, window_size)
+
+    u_t = torch.tensor(u_windows[:n_windows], dtype=torch.float32).unsqueeze(-1)
+    y_t = torch.tensor(y_windows[:n_windows], dtype=torch.float32).unsqueeze(-1)
+    return torch.utils.data.TensorDataset(u_t, y_t)
+
+
+def train_sequence_model(
+    model: nn.Module,
+    u_train: np.ndarray,
+    y_train: np.ndarray,
+    *,
+    config: BaseConfig,
+    logger=None,
+    device: str = "cpu",
+    val_data: tuple | None = None,
+) -> List[float]:
+    """Train a sequence model (GRU/LSTM/TCN/Mamba) with sliding windows.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Sequence network.
+    u_train, y_train : np.ndarray
+        Training signals.
+    config : BaseConfig
+        Must have ``train_window_size``, ``batch_size``, ``learning_rate``,
+        ``epochs``, ``grad_clip``, ``scheduler_*``, ``verbose``.
+    logger : WandbLogger | None
+    device : str
+    val_data : tuple | None
+        (u_val, y_val) for validation loss tracking.
+
+    Returns
+    -------
+    list[float]
+        Per-epoch training losses.
+    """
+    window_size = getattr(config, "train_window_size", 20)
+    dataset = create_sequence_dataset(u_train, y_train, window_size)
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size=config.batch_size, shuffle=True, drop_last=True
+    )
+
+    model.to(device)
+    optimizer = make_optimizer(model.parameters(), lr=config.learning_rate)
+    scheduler = make_scheduler(
+        optimizer,
+        patience=config.scheduler_patience,
+        factor=config.scheduler_factor,
+        min_lr=config.scheduler_min_lr,
+    )
+    stopper = EarlyStopper(config.early_stopping_patience)
+    criterion = nn.MSELoss()
+
+    def step_fn(_epoch: int) -> float:
+        model.train()
+        total_loss = 0.0
+        count = 0
+        for u_batch, y_batch in loader:
+            u_batch = u_batch.to(device)
+            y_batch = y_batch.to(device)
+            optimizer.zero_grad()
+            pred = model(u_batch)
+            loss = criterion(pred, y_batch)
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+            optimizer.step()
+            total_loss += loss.item()
+            count += 1
+        return total_loss / max(count, 1)
+
+    return train_loop(
+        step_fn,
+        epochs=config.epochs,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        early_stopper=stopper,
+        logger=logger,
+        log_every=getattr(config, "wandb_log_every", 1),
+        verbose=config.verbose,
+        desc=f"Training (sequence)",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Continuous-time subsequence training (NeuralODE / SDE / UDE / Physics)
+# ─────────────────────────────────────────────────────────────────────
+
+def train_sequence_batches(
+    step_fn: Callable,
+    *,
+    u: np.ndarray,
+    y: np.ndarray,
+    config: BaseConfig,
+    t: np.ndarray | None = None,
+    optimizer: torch.optim.Optimizer,
+    logger=None,
+    device: str = "cpu",
+) -> List[float]:
+    """Epoch loop for continuous-time models with subsequence batching.
+
+    ``step_fn(u_sub, y_sub, t_sub)`` is called with random subsequences
+    and must return the scalar loss (already backpropagated).
+
+    Parameters
+    ----------
+    step_fn : callable(u_sub, y_sub, t_sub) -> float
+        One-subsequence forward/backward pass.
+    u, y : np.ndarray
+        Full training signals.
+    config : BaseConfig
+    t : np.ndarray | None
+        Time vector; generated from ``config.dt`` if absent.
+    optimizer : Optimizer
+    logger : WandbLogger | None
+    device : str
+
+    Returns
+    -------
+    list[float]
+        Per-epoch losses.
+    """
+    dt = getattr(config, "dt", 0.05)
+    window = getattr(config, "train_window_size", 50)
+    seqs_per_epoch = getattr(config, "sequences_per_epoch", 24)
+    grad_clip = getattr(config, "grad_clip", DEFAULT_GRAD_CLIP)
+
+    N = len(u)
+    if t is None:
+        t = np.arange(N) * dt
+
+    scheduler = make_scheduler(
+        optimizer,
+        patience=config.scheduler_patience,
+        factor=config.scheduler_factor,
+        min_lr=config.scheduler_min_lr,
+    )
+    stopper = EarlyStopper(config.early_stopping_patience)
+
+    def epoch_step(_epoch: int) -> float:
+        total = 0.0
+        for _ in range(seqs_per_epoch):
+            max_start = max(N - window, 1)
+            start = np.random.randint(0, max_start)
+            end = min(start + window, N)
+            u_sub = u[start:end]
+            y_sub = y[start:end]
+            t_sub = t[start:end] - t[start]
+
+            optimizer.zero_grad()
+            loss_val = step_fn(u_sub, y_sub, t_sub)
+            nn.utils.clip_grad_norm_(
+                [p for g in optimizer.param_groups for p in g["params"]],
+                grad_clip,
+            )
+            optimizer.step()
+            total += loss_val
+        return total / seqs_per_epoch
+
+    return train_loop(
+        epoch_step,
+        epochs=config.epochs,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        early_stopper=stopper,
+        logger=logger,
+        log_every=getattr(config, "wandb_log_every", 1),
+        verbose=config.verbose,
+        desc="Training (continuous)",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# K-step shooting (blackbox ODE/SDE/CDE)
+# ─────────────────────────────────────────────────────────────────────
+
+def prepare_shooting_windows(
+    u: np.ndarray,
+    y: np.ndarray,
+    k_steps: int,
+    dt: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Slice ``(u, y)`` into k-step windows for shooting training.
+
+    Returns
+    -------
+    u_windows : Tensor [n_windows, k_steps, 1]
+    y_windows : Tensor [n_windows, k_steps, state_dim]
+    t_span : Tensor [k_steps]
+    """
+    N = len(u)
+    n_windows = N - k_steps
+    if n_windows <= 0:
+        raise ValueError(
+            f"Signal length ({N}) must exceed k_steps ({k_steps})"
+        )
+
+    u_arr = np.asarray(u, dtype=np.float32).ravel()
+    y_arr = np.asarray(y, dtype=np.float32).ravel()
+
+    u_wins = np.lib.stride_tricks.sliding_window_view(u_arr, k_steps)[:n_windows]
+    y_wins = np.lib.stride_tricks.sliding_window_view(y_arr, k_steps + 1)[:n_windows]
+
+    # y_windows includes the initial condition at [:, 0] and targets at [:, 1:]
+    u_t = torch.tensor(u_wins, dtype=torch.float32).unsqueeze(-1)
+    y_t = torch.tensor(y_wins, dtype=torch.float32).unsqueeze(-1)
+    t_span = torch.linspace(0, k_steps * dt, k_steps + 1)
+
+    return u_t, y_t, t_span

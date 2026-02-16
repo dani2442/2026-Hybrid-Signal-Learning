@@ -1,72 +1,43 @@
-#!/usr/bin/env python
-"""Load a saved model checkpoint and evaluate on test data.
+"""Load a saved model and test it.
 
-Usage::
+Usage
+-----
+::
 
-    python examples/load_and_test.py checkpoints/gru_multisine_05.pt
-    python examples/load_and_test.py checkpoints/gru_multisine_05.pt --dataset swept_sine
+    python -m examples.load_and_test --model-path trained_models/narx_multisine_05.pkl \\
+        --dataset multisine_05
 """
 
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
+import os
+import sys
 
-from src.models.base import load_model
-from src.data import Dataset
-from src.validation import Metrics
-from src.visualization import plot_predictions
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from src.data import from_bab_experiment
+from src.models import load_model
+from src.validation.metrics import summary
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Load a model and evaluate.")
-    parser.add_argument("checkpoint", type=str, help="Path to .pt checkpoint")
-    parser.add_argument(
-        "--dataset",
-        default="multisine_05",
-        help="BAB experiment key for test data (default: multisine_05)",
-    )
-    parser.add_argument(
-        "--split",
-        type=float,
-        default=0.85,
-        help="Train/test split ratio; test = 1-split (default: 0.85)",
-    )
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Load and test a saved model")
+    parser.add_argument("--model-path", type=str, required=True)
+    parser.add_argument("--dataset", type=str, default="multisine_05")
+    parser.add_argument("--train-ratio", type=float, default=0.7)
+    parser.add_argument("--val-ratio", type=float, default=0.15)
     args = parser.parse_args()
 
-    # ── Load model ────────────────────────────────────────────────────
-    model = load_model(args.checkpoint)
-    print(f"Loaded: {model!r}")
-    print(f"  config: {model.config}")
-    print(f"  fitted: {model._is_fitted}")
+    ds = from_bab_experiment(args.dataset)
+    _, _, test_ds = ds.train_val_test_split(args.train_ratio, args.val_ratio)
 
-    # ── Data ──────────────────────────────────────────────────────────
-    ds = Dataset.from_bab_experiment(args.dataset)
-    _, test_ds = ds.split(ratio=args.split)
-    print(f"\nTest set: {test_ds.name}  ({len(test_ds)} samples)")
+    print(f"Loading model from: {args.model_path}")
+    model = load_model(args.model_path)
+    print(f"Model: {model}")
 
-    # ── Predict ───────────────────────────────────────────────────────
-    y_osa = model.predict(test_ds.u, test_ds.y, mode="OSA")
-    y_fr = model.predict(test_ds.u, test_ds.y, mode="FR")
-
-    # ── Metrics ───────────────────────────────────────────────────────
-    ckpt_name = Path(args.checkpoint).stem
-    print("\n── One-Step-Ahead ──")
-    Metrics.summary(test_ds.y, y_osa, name=f"{ckpt_name} (OSA)")
-    print("\n── Free-Run ──")
-    Metrics.summary(test_ds.y, y_fr, name=f"{ckpt_name} (FR)")
-
-    # ── Plot ──────────────────────────────────────────────────────────
-    plot_dir = Path("plots")
-    plot_dir.mkdir(exist_ok=True)
-    plot_predictions(
-        test_ds.t,
-        test_ds.y,
-        {f"{ckpt_name} OSA": y_osa, f"{ckpt_name} FR": y_fr},
-        title=f"Loaded model – {ckpt_name}",
-        save_path=str(plot_dir / f"test_{ckpt_name}.png"),
-    )
-    print(f"\nPlot saved → plots/test_{ckpt_name}.png")
+    y_pred = model.predict(test_ds.u, y0=test_ds.y[:1])
+    print(summary(test_ds.y, y_pred, model.name))
 
 
 if __name__ == "__main__":

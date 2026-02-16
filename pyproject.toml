@@ -16,7 +16,6 @@ dependencies = [
     "tqdm>=4.67.2",
     "wandb>=0.24.2",
     "transformers>=5.1.0",
-    "mamba-ssm>=2.3.0",
 ]
 
 [project.optional-dependencies]

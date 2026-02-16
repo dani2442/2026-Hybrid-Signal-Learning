@@ -8,16 +8,8 @@ from typing import Any, Dict, Optional
 class WandbLogger:
     """Thin wrapper around ``wandb`` for consistent logging.
 
-    Usage::
-
-        logger = WandbLogger(project="my-project", run_name="lstm-run-1",
-                              config=cfg.to_dict())
-        logger.log_metrics({"train/loss": 0.05, "val/loss": 0.06}, step=10)
-        logger.finish()
-
     If ``wandb`` is not installed or *project* is ``None`` the logger
-    silently becomes a no-op so callers never need to guard with
-    ``if logger:``.
+    silently becomes a no-op so callers never need to guard.
     """
 
     def __init__(
@@ -39,7 +31,6 @@ class WandbLogger:
                 reinit=True,
             )
         except Exception:
-            # wandb import or init failure → degrade gracefully
             self._run = None
 
     @property

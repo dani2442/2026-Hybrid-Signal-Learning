@@ -1,87 +1,104 @@
-"""Canonical model registry helpers.
+"""Model registry with decorator-based auto-registration.
 
-This module centralizes:
-  * model key -> class resolution
-  * model key -> config class resolution
+Every model class decorates itself with ``@register_model`` which
+populates the global registry.  No manual syncing of multiple files
+is required.
+
+Usage
+-----
+::
+
+    from src.config import NARXConfig
+    from src.models.registry import register_model
+
+    @register_model("narx", NARXConfig)
+    class NARXModel(BaseModel):
+        ...
+
+Then later::
+
+    from src.models.registry import build_model, list_models
+
+    model = build_model("narx", nu=5, ny=5)
 """
 
 from __future__ import annotations
 
-from typing import Any, Type
+from typing import Any, Dict, List, Tuple, Type
 
-from ..config import MODEL_CONFIGS
-
-
-MODEL_CLASS_NAMES: dict[str, str] = {
-    "narx": "NARX",
-    "arima": "ARIMA",
-    "exponential_smoothing": "ExponentialSmoothing",
-    "random_forest": "RandomForest",
-    "neural_network": "NeuralNetwork",
-    "gru": "GRU",
-    "lstm": "LSTM",
-    "tcn": "TCN",
-    "mamba": "Mamba",
-    "neural_ode": "NeuralODE",
-    "neural_sde": "NeuralSDE",
-    "neural_cde": "NeuralCDE",
-    "linear_physics": "LinearPhysics",
-    "stribeck_physics": "StribeckPhysics",
-    "hybrid_linear_beam": "HybridLinearBeam",
-    "hybrid_nonlinear_cam": "HybridNonlinearCam",
-    "ude": "UDE",
-    "vanilla_node_2d": "VanillaNODE2D",
-    "structured_node": "StructuredNODE",
-    "adaptive_node": "AdaptiveNODE",
-    "vanilla_ncde_2d": "VanillaNCDE2D",
-    "structured_ncde": "StructuredNCDE",
-    "adaptive_ncde": "AdaptiveNCDE",
-    "vanilla_nsde_2d": "VanillaNSDE2D",
-    "structured_nsde": "StructuredNSDE",
-    "adaptive_nsde": "AdaptiveNSDE",
-}
-
-MODEL_KEYS: tuple[str, ...] = tuple(MODEL_CONFIGS.keys())
+# Registry: name → (model_class, config_class)
+_REGISTRY: Dict[str, Tuple[Type, Type]] = {}
 
 
-def list_model_keys() -> tuple[str, ...]:
-    """Return canonical model keys."""
-    return MODEL_KEYS
+def register_model(name: str, config_cls: Type):
+    """Class decorator that registers a model under *name*.
+
+    Parameters
+    ----------
+    name : str
+        Unique model key (e.g. ``"narx"``, ``"gru"``).
+    config_cls : type
+        Corresponding config dataclass.
+    """
+    def decorator(cls):
+        if name in _REGISTRY:
+            existing = _REGISTRY[name][0].__name__
+            raise ValueError(
+                f"Duplicate model registration: '{name}' already maps to "
+                f"{existing}, cannot register {cls.__name__}"
+            )
+        _REGISTRY[name] = (cls, config_cls)
+        cls.name = name
+        cls._config_cls = config_cls
+        return cls
+    return decorator
 
 
-def get_model_config_class(key: str) -> Type:
-    """Resolve model key to config class."""
-    key_norm = key.strip().lower()
-    try:
-        return MODEL_CONFIGS[key_norm]
-    except KeyError as exc:
-        available = ", ".join(sorted(MODEL_CONFIGS))
-        raise ValueError(f"Unknown model key '{key}'. Available: {available}") from exc
-
-
-def get_model_class(key: str) -> Type:
-    """Resolve model key to model class."""
-    import src.models as models_pkg
-
-    key_norm = key.strip().lower()
-    class_name = MODEL_CLASS_NAMES.get(key_norm)
-    if class_name is None:
-        available = ", ".join(sorted(MODEL_CLASS_NAMES))
-        raise ValueError(f"Unknown model key '{key}'. Available: {available}")
-
-    model_cls = getattr(models_pkg, class_name, None)
-    if model_cls is None:
-        raise ValueError(
-            f"Model class '{class_name}' for key '{key_norm}' is not exported from src.models."
+def get_model_class(name: str) -> Type:
+    """Return the model class registered under *name*."""
+    if name not in _REGISTRY:
+        raise KeyError(
+            f"Unknown model '{name}'. Available: {', '.join(sorted(_REGISTRY))}"
         )
-    return model_cls
+    return _REGISTRY[name][0]
 
 
-def build_model(key: str, config: Any = None, **kwargs):
-    """Instantiate a model from key + config/kwargs."""
-    model_cls = get_model_class(key)
-    if config is not None and kwargs:
-        raise ValueError("Pass either config or kwargs, not both.")
-    if config is not None:
-        return model_cls(config=config)
-    return model_cls(**kwargs)
+def get_config_class(name: str) -> Type:
+    """Return the config class for model *name*."""
+    if name not in _REGISTRY:
+        raise KeyError(
+            f"Unknown model '{name}'. Available: {', '.join(sorted(_REGISTRY))}"
+        )
+    return _REGISTRY[name][1]
+
+
+def build_model(name: str, **config_kwargs: Any):
+    """Instantiate a registered model with the given config overrides.
+
+    Parameters
+    ----------
+    name : str
+        Registered model key.
+    **config_kwargs
+        Passed to the model's config constructor.
+
+    Returns
+    -------
+    BaseModel
+        Fully constructed (untrained) model instance.
+    """
+    model_cls = get_model_class(name)
+    cfg_cls = get_config_class(name)
+    cfg = cfg_cls(**{k: v for k, v in config_kwargs.items()
+                     if hasattr(cfg_cls, k) or k in {f.name for f in __import__('dataclasses').fields(cfg_cls)}})
+    return model_cls(cfg)
+
+
+def list_models() -> List[str]:
+    """Return sorted list of registered model names."""
+    return sorted(_REGISTRY.keys())
+
+
+def is_registered(name: str) -> bool:
+    """Check if a model name is registered."""
+    return name in _REGISTRY

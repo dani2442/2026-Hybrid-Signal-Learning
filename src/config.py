@@ -16,15 +16,39 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class BaseConfig:
-    """Shared fields for every model."""
+    """Shared fields for every model.
+
+    Attributes:
+        nu: Number of input lags (discrete models) or input dim (continuous).
+        ny: Number of output lags (discrete models) or output dim (continuous).
+        learning_rate: Optimiser learning rate.
+        epochs: Maximum training epochs.
+        batch_size: Mini-batch size.
+        train_window_size: Random sub-window length for training data.
+            When set, the training Dataset yields random windows of this
+            size; validation and test always use the full sequence.
+        grad_clip: Maximum gradient norm for clipping.
+        scheduler_patience: ReduceLROnPlateau patience.
+        scheduler_factor: ReduceLROnPlateau reduction factor.
+        scheduler_min_lr: ReduceLROnPlateau minimum learning rate.
+        early_stopping_patience: Stop after this many epochs without improvement.
+        verbose: Show progress bars and status messages.
+        device: Compute device (``"auto"``, ``"cpu"``, ``"cuda"``).
+        seed: Random seed for reproducibility.
+    """
 
     nu: int = 1
     ny: int = 1
     learning_rate: float = 1e-3
     epochs: int = 100
     batch_size: int = 32
+    train_window_size: int = 20
+    grad_clip: float = 1.0
+    scheduler_patience: int = 200
+    scheduler_factor: float = 0.5
+    scheduler_min_lr: float = 1e-6
     verbose: bool = True
-    device: str = "auto"          # "auto", "cpu", "cuda", "cuda:0", …
+    device: str = "auto"
     seed: Optional[int] = None
     wandb_project: Optional[str] = None
     wandb_run_name: Optional[str] = None
@@ -148,7 +172,7 @@ class NeuralODEConfig(BaseConfig):
     hidden_layers: List[int] = field(default_factory=lambda: [64, 64])
     solver: str = "euler"
     dt: float = 0.05
-    sequence_length: int = 50
+    train_window_size: int = 50
     sequences_per_epoch: int = 24
     activation: str = "selu"
     training_mode: str = "subsequence"
@@ -162,7 +186,7 @@ class NeuralSDEConfig(BaseConfig):
     diffusion_hidden_layers: List[int] = field(default_factory=lambda: [64, 64])
     solver: str = "euler"
     dt: float = 0.05
-    sequence_length: int = 50
+    train_window_size: int = 50
     sequences_per_epoch: int = 24
 
 
@@ -175,7 +199,7 @@ class NeuralCDEConfig(BaseConfig):
     solver: str = "rk4"
     rtol: float = 1e-4
     atol: float = 1e-5
-    sequence_length: int = 50
+    train_window_size: int = 50
     sequences_per_epoch: int = 24
 
 
@@ -188,7 +212,7 @@ class LinearPhysicsConfig(BaseConfig):
     dt: float = 0.05
     solver: str = "euler"
     epochs: int = 1000
-    sequence_length: int = 50
+    train_window_size: int = 50
     training_mode: str = "full"
 
 
@@ -197,7 +221,7 @@ class StribeckPhysicsConfig(BaseConfig):
     dt: float = 0.05
     solver: str = "euler"
     epochs: int = 1000
-    sequence_length: int = 50
+    train_window_size: int = 50
     training_mode: str = "full"
 
 
@@ -218,7 +242,6 @@ class HybridNonlinearCamConfig(BaseConfig):
     epochs: int = 600
     learning_rate: float = 2e-2
     integration_substeps: int = 20
-    # Physical parameters
     R: float = 0.015
     r: float = 0.005
     e: float = 0.005
@@ -243,7 +266,7 @@ class UDEConfig(BaseConfig):
     hidden_layers: List[int] = field(default_factory=lambda: [64, 64])
     solver: str = "euler"
     epochs: int = 1000
-    sequence_length: int = 50
+    train_window_size: int = 50
     training_mode: str = "full"
     activation: str = "selu"
 
@@ -262,6 +285,7 @@ class BlackboxODE2DConfig(BaseConfig):
     k_steps: int = 20
     epochs: int = 5000
     batch_size: int = 128
+    grad_clip: float = 10.0
 
 
 @dataclass
@@ -275,6 +299,7 @@ class BlackboxSDE2DConfig(BaseConfig):
     k_steps: int = 20
     epochs: int = 5000
     batch_size: int = 128
+    grad_clip: float = 10.0
 
 
 @dataclass
@@ -287,37 +312,4 @@ class BlackboxCDE2DConfig(BaseConfig):
     k_steps: int = 20
     epochs: int = 5000
     batch_size: int = 128
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Registry: model name → config class
-# ─────────────────────────────────────────────────────────────────────
-
-MODEL_CONFIGS: Dict[str, type] = {
-    "narx": NARXConfig,
-    "arima": ARIMAConfig,
-    "exponential_smoothing": ExponentialSmoothingConfig,
-    "random_forest": RandomForestConfig,
-    "neural_network": NeuralNetworkConfig,
-    "gru": GRUConfig,
-    "lstm": LSTMConfig,
-    "tcn": TCNConfig,
-    "mamba": MambaConfig,
-    "neural_ode": NeuralODEConfig,
-    "neural_sde": NeuralSDEConfig,
-    "neural_cde": NeuralCDEConfig,
-    "linear_physics": LinearPhysicsConfig,
-    "stribeck_physics": StribeckPhysicsConfig,
-    "hybrid_linear_beam": HybridLinearBeamConfig,
-    "hybrid_nonlinear_cam": HybridNonlinearCamConfig,
-    "ude": UDEConfig,
-    "vanilla_node_2d": BlackboxODE2DConfig,
-    "structured_node": BlackboxODE2DConfig,
-    "adaptive_node": BlackboxODE2DConfig,
-    "vanilla_ncde_2d": BlackboxCDE2DConfig,
-    "structured_ncde": BlackboxCDE2DConfig,
-    "adaptive_ncde": BlackboxCDE2DConfig,
-    "vanilla_nsde_2d": BlackboxSDE2DConfig,
-    "structured_nsde": BlackboxSDE2DConfig,
-    "adaptive_nsde": BlackboxSDE2DConfig,
-}
+    grad_clip: float = 10.0
