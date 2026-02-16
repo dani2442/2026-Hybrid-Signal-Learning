@@ -159,18 +159,31 @@ class BaseModel(ABC):
         y: Optional[np.ndarray] = None,
         mode: str = "OSA",
     ) -> np.ndarray:
-        """Unified prediction dispatch."""
+        """Unified prediction dispatch.
+
+        Returns an array of length ``len(y)`` whose first ``max_lag``
+        entries are ``NaN`` (initial conditions, not predictions).
+        """
         if not self._is_fitted:
             raise RuntimeError("Model not fitted. Call fit() first.")
         if mode == "OSA":
             if y is None:
                 raise ValueError("y required for OSA prediction")
-            return self.predict_osa(u, y)
-        if mode == "FR":
+            raw = self.predict_osa(u, y)
+        elif mode == "FR":
             if y is None:
                 raise ValueError("Initial conditions y required for free-run")
-            return self.predict_free_run(u, y)
-        raise ValueError(f"Unknown mode: {mode}. Use 'OSA' or 'FR'.")
+            raw = self.predict_free_run(u, y)
+        else:
+            raise ValueError(f"Unknown mode: {mode}. Use 'OSA' or 'FR'.")
+
+        # Pad so output length == len(y) with NaN for initial conditions
+        n_y = len(np.asarray(y))
+        raw = np.asarray(raw, dtype=float).flatten()
+        if len(raw) < n_y:
+            pad = n_y - len(raw)
+            raw = np.concatenate([np.full(pad, np.nan), raw])
+        return raw
 
     # ── save / load ───────────────────────────────────────────────────
 

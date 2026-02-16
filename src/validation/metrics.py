@@ -123,8 +123,11 @@ class Metrics:
 def _align_arrays(
     y_true: np.ndarray, y_pred: np.ndarray
 ) -> tuple:
-    """Align arrays to same length."""
-    y_true = np.asarray(y_true).flatten()
-    y_pred = np.asarray(y_pred).flatten()
+    """Align arrays to same length and drop NaN entries."""
+    y_true = np.asarray(y_true, dtype=float).flatten()
+    y_pred = np.asarray(y_pred, dtype=float).flatten()
     n = min(len(y_true), len(y_pred))
-    return y_true[:n], y_pred[:n]
+    y_true, y_pred = y_true[:n], y_pred[:n]
+    # Drop positions where either array is NaN
+    valid = ~(np.isnan(y_true) | np.isnan(y_pred))
+    return y_true[valid], y_pred[valid]

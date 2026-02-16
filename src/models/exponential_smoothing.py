@@ -46,7 +46,24 @@ class ExponentialSmoothing(PickleStateMixin, BaseModel):
     # ── prediction ────────────────────────────────────────────────────
 
     def predict_osa(self, u: np.ndarray, y: np.ndarray) -> np.ndarray:
-        return np.asarray(self.fitted_model_.fittedvalues[self.max_lag:])
+        """One-step-ahead on *test* data by refitting with the same params."""
+        from statsmodels.tsa.holtwinters import ExponentialSmoothing as StatsES
+
+        cfg = self.config
+        # Re-apply the model to the test series
+        model = StatsES(
+            y,
+            trend=cfg.trend,
+            seasonal=cfg.seasonal,
+            seasonal_periods=cfg.seasonal_periods,
+        )
+        refit = model.fit(
+            smoothing_level=self.fitted_model_.params.get("smoothing_level"),
+            smoothing_trend=self.fitted_model_.params.get("smoothing_trend"),
+            smoothing_seasonal=self.fitted_model_.params.get("smoothing_seasonal"),
+            optimized=False,
+        )
+        return np.asarray(refit.fittedvalues[self.max_lag:])
 
     def predict_free_run(self, u: np.ndarray, y_initial: np.ndarray) -> np.ndarray:
         n_forecast = len(u) - self.max_lag

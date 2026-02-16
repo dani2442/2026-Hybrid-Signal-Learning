@@ -41,9 +41,13 @@ class ARIMA(PickleStateMixin, BaseModel):
     # ── prediction ────────────────────────────────────────────────────
 
     def predict_osa(self, u: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """One-step-ahead on *test* data using ``apply`` + ``get_prediction``."""
         exog = u.reshape(-1, 1) if self.nu > 0 else None
-        pred = self.fitted_model_.get_prediction(exog=exog)
-        return pred.predicted_mean[self.max_lag:]
+        # Apply the fitted model to the new test series so predictions
+        # are computed on test data, not the original training data.
+        applied = self.fitted_model_.apply(y, exog=exog)
+        pred = applied.predict(start=self.max_lag, end=len(y) - 1)
+        return np.asarray(pred)
 
     def predict_free_run(self, u: np.ndarray, y_initial: np.ndarray) -> np.ndarray:
         n_forecast = len(u) - self.max_lag

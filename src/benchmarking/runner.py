@@ -310,15 +310,14 @@ class BenchmarkRunner:
         if mode not in {"OSA", "FR"}:
             raise ValueError(f"Unsupported mode: {mode}")
 
-        if mode == "OSA":
-            y_pred = model.predict(test_ds.u, test_ds.y, mode="OSA")
-        else:
-            y_init = test_ds.y[: model.max_lag]
-            y_pred = model.predict(test_ds.u, y_init, mode="FR")
-
-        y_true = test_ds.y[model.max_lag :]
+        # predict() returns NaN-padded arrays aligned with test_ds.y;
+        # _align_arrays drops NaN entries so metrics are computed on
+        # the valid (non-initial-condition) portion only.
+        y_pred = model.predict(test_ds.u, test_ds.y, mode=mode)
+        y_true = test_ds.y
         metrics = Metrics.compute_all(y_true, y_pred)
-        return metrics, len(y_pred)
+        n_valid = int(np.sum(~np.isnan(y_pred)))
+        return metrics, n_valid
 
     def run(self, wandb_run=None) -> list[dict[str, float | int | str]]:
         """Execute all benchmark cases on all datasets."""
