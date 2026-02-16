@@ -99,8 +99,10 @@ class NeuralCDEModel(PickleStateMixin, BaseModel):
         input_dim = cfg.input_dim  # channels in path
         hidden_dim = cfg.hidden_dim
 
-        self.cde_func = _CDEFunc(hidden_dim, input_dim).to(device)
-        self.initial_net = nn.Linear(input_dim, hidden_dim).to(device)
+        # Path channels: [time, u, y] = 3 during training
+        path_channels = 3
+        self.cde_func = _CDEFunc(hidden_dim, path_channels).to(device)
+        self.initial_net = nn.Linear(path_channels, hidden_dim).to(device)
         self.output_net = nn.Linear(hidden_dim, 1).to(device)
 
         all_params = (

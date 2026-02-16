@@ -60,20 +60,28 @@ class _DriftNet(nn.Module):
 # Simple ODE integrators
 # ─────────────────────────────────────────────────────────────────────
 
+def _ensure_dims(y, u):
+    """Ensure *y* and *u* have compatible dimensions for cat."""
+    if u.dim() == 0:
+        u = u.unsqueeze(0)
+    if y.dim() == 1 and u.dim() == 1:
+        return y.unsqueeze(0), u.unsqueeze(0), True
+    if u.dim() < y.dim():
+        u = u.unsqueeze(0)
+    return y, u, False
+
+
 def _euler_integrate(drift_net, y0, u_func, t_span, device):
     """Fixed-step Euler integration."""
     ys = [y0]
     y = y0
     for i in range(len(t_span) - 1):
         dt = t_span[i + 1] - t_span[i]
-        t_i = t_span[i]
-        u_i = u_func(t_i).unsqueeze(0) if u_func(t_i).dim() == 0 else u_func(t_i).unsqueeze(-1) if u_func(t_i).dim() == 0 else u_func(t_i)
-        if u_i.dim() == 0:
-            u_i = u_i.unsqueeze(0)
-        if u_i.dim() == 1 and y.dim() == 1:
-            dydt = drift_net(y.unsqueeze(0), u_i.unsqueeze(0)).squeeze(0)
-        else:
-            dydt = drift_net(y, u_i)
+        u_i = u_func(t_span[i])
+        yy, uu, squeezed = _ensure_dims(y, u_i)
+        dydt = drift_net(yy, uu)
+        if squeezed:
+            dydt = dydt.squeeze(0)
         y = y + dt * dydt
         ys.append(y)
     return torch.stack(ys)
@@ -91,11 +99,9 @@ def _rk4_integrate(drift_net, y0, u_func, t_span, device):
 
         def _eval(yy, tt):
             uu = u_func(tt)
-            if uu.dim() == 0:
-                uu = uu.unsqueeze(0)
-            if yy.dim() == 1 and uu.dim() == 1:
-                return drift_net(yy.unsqueeze(0), uu.unsqueeze(0)).squeeze(0)
-            return drift_net(yy, uu)
+            yy2, uu2, squeezed = _ensure_dims(yy, uu)
+            out = drift_net(yy2, uu2)
+            return out.squeeze(0) if squeezed else out
 
         k1 = _eval(y, t_i)
         k2 = _eval(y + dt / 2 * k1, t_mid)

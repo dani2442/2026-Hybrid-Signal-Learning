@@ -64,6 +64,8 @@ class _UDEFunc(nn.Module):
         if y.dim() == 1:
             y = y.unsqueeze(0)
             u = u.unsqueeze(0)
+        elif u.dim() < y.dim():
+            u = u.unsqueeze(0)
 
         linear_part = y @ self.A.T + u @ self.B.T
         nn_part = self.nn(torch.cat([y, u], dim=-1))
