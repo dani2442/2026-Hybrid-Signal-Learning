@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
+from ..utils.runtime import resolve_device
+
 # ─────────────────────────────────────────────────────────────────────
 # Shared constants
 # ─────────────────────────────────────────────────────────────────────
@@ -21,23 +23,6 @@ SHOOTING_GRAD_CLIP = 10.0
 
 NORM_EPS = 1e-8
 """Epsilon guard for z-score normalisation denominators."""
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Utilities
-# ─────────────────────────────────────────────────────────────────────
-
-def resolve_device(device: str = "auto"):
-    """Return a ``torch.device`` from a config string.
-
-    Accepts ``"auto"`` (→ CUDA if available, else CPU), ``"cpu"``,
-    ``"cuda"``, ``"cuda:0"``, etc.
-    """
-    import torch
-
-    if device == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(device)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -90,6 +75,13 @@ class BaseModel(ABC):
         self.max_lag: int = max(config.nu, config.ny)
         self._is_fitted: bool = False
         self.training_loss_: list[float] = []
+
+    def _resolve_torch_device(self, device: Optional[str] = None):
+        """Resolve configured device string into a ``torch.device``."""
+        import torch
+
+        resolved = resolve_device(self.config.device if device is None else device)
+        return torch.device(resolved)
 
     # ── public training entry point ───────────────────────────────────
 

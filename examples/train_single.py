@@ -17,6 +17,7 @@ from src.data import Dataset
 from src.config import MODEL_CONFIGS
 from src.validation import Metrics
 from src.visualization import plot_predictions
+from src.utils import ensure_proxy_env
 
 # Map of friendly name → (model class import path, config class key)
 _MODEL_REGISTRY: dict[str, str] = {
@@ -78,6 +79,8 @@ def main():
         help="Directory for saved models (default: checkpoints)",
     )
     args = parser.parse_args()
+
+    ensure_proxy_env()
 
     # ── Data ──────────────────────────────────────────────────────────
     ds = Dataset.from_bab_experiment(args.dataset)
