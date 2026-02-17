@@ -4,6 +4,7 @@ from .dataset import Dataset, DatasetCollection
 from .loaders import (
     BAB_DATASET_REGISTRY,
     from_bab_experiment,
+    from_bab_experiments,
     from_mat,
     from_url,
     list_bab_experiments,
@@ -24,6 +25,7 @@ __all__ = [
     "DatasetCollection",
     "BAB_DATASET_REGISTRY",
     "from_bab_experiment",
+    "from_bab_experiments",
     "from_mat",
     "from_url",
     "list_bab_experiments",

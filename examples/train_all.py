@@ -5,6 +5,7 @@ Usage
 ::
 
     python -m examples.train_all --dataset multisine_05
+    python -m examples.train_all --datasets multisine_05 swept_sine
 """
 
 from __future__ import annotations
@@ -16,14 +17,40 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.benchmarking import results_to_json, run_all_benchmarks
-from src.data import from_bab_experiment
+from src.data import (
+    DatasetCollection,
+    from_bab_experiment,
+    from_bab_experiments,
+    list_bab_experiments,
+)
 from src.models import list_models
 from src.utils.runtime import seed_all
 
 
+def _resolve_dataset_names(dataset: str, datasets: list[str] | None) -> list[str]:
+    if datasets:
+        return datasets
+    return [name.strip() for name in dataset.split(",") if name.strip()]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark all models")
-    parser.add_argument("--dataset", type=str, default="multisine_05")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="multisine_05",
+        help="Single dataset key (or comma-separated keys).",
+    )
+    parser.add_argument(
+        "--datasets",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "One or more dataset keys. Overrides --dataset when provided. "
+            f"Available: {', '.join(list_bab_experiments())}"
+        ),
+    )
     parser.add_argument("--train-ratio", type=float, default=0.7)
     parser.add_argument("--val-ratio", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=42)
@@ -35,9 +62,17 @@ def main() -> None:
     args = parser.parse_args()
 
     seed_all(args.seed)
-    ds = from_bab_experiment(args.dataset)
+    dataset_names = _resolve_dataset_names(args.dataset, args.datasets)
+    ds = (
+        from_bab_experiment(dataset_names[0])
+        if len(dataset_names) == 1
+        else from_bab_experiments(dataset_names)
+    )
 
-    print(f"Dataset: {ds.name}  ({ds.n_samples} samples)")
+    if isinstance(ds, DatasetCollection):
+        print(f"Datasets: {', '.join(ds.names)}  ({len(ds)} experiments)")
+    else:
+        print(f"Dataset: {ds.name}  ({ds.n_samples} samples)")
     print(f"Available models: {list_models()}")
 
     overrides = {"seed": args.seed}

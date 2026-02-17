@@ -9,17 +9,35 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from src.data import Dataset
+from src.data import Dataset, DatasetCollection
 from src.models import build_model, list_models
-from src.validation.metrics import compute_all, summary
+from src.validation.metrics import compute_all
+
+DataPair = tuple[np.ndarray, np.ndarray]
+DataInput = DataPair | List[DataPair]
+
+
+def _to_pairs(data: DataInput) -> List[DataPair]:
+    """Normalize ``(u, y)`` or ``[(u, y), ...]`` to a list of pairs."""
+    if isinstance(data, tuple) and len(data) == 2:
+        return [(np.asarray(data[0]).ravel(), np.asarray(data[1]).ravel())]
+    return [
+        (np.asarray(u).ravel(), np.asarray(y).ravel())
+        for u, y in data
+    ]
+
+
+def _pack_pairs(pairs: List[DataPair]) -> DataInput:
+    """Use a tuple for one dataset, list for many."""
+    return pairs[0] if len(pairs) == 1 else pairs
 
 
 def run_single_benchmark(
     model_name: str,
-    train_data: tuple[np.ndarray, np.ndarray],
-    test_data: tuple[np.ndarray, np.ndarray],
+    train_data: DataInput,
+    test_data: DataInput,
     *,
-    val_data: tuple[np.ndarray, np.ndarray] | None = None,
+    val_data: DataInput | None = None,
     config_overrides: Dict[str, Any] | None = None,
     logger=None,
     verbose: bool = True,
@@ -61,9 +79,20 @@ def run_single_benchmark(
     train_time = time.time() - t0
 
     try:
-        y_pred = model.predict(test_data[0], test_data[1], mode="FR")
         skip = getattr(model, "max_lag", 0)
-        metrics = compute_all(test_data[1], y_pred, skip=skip)
+        y_true_parts: List[np.ndarray] = []
+        y_pred_parts: List[np.ndarray] = []
+
+        for u_test, y_test in _to_pairs(test_data):
+            y_pred = model.predict(u_test, y_test, mode="FR")
+            n = min(len(y_test), len(y_pred))
+            start = min(skip, n)
+            y_true_parts.append(np.asarray(y_test)[start:n])
+            y_pred_parts.append(np.asarray(y_pred)[start:n])
+
+        y_true_all = np.concatenate(y_true_parts)
+        y_pred_all = np.concatenate(y_pred_parts)
+        metrics = compute_all(y_true_all, y_pred_all, skip=0)
     except Exception as exc:
         return {
             "model_name": model_name,
@@ -82,7 +111,7 @@ def run_single_benchmark(
 
 
 def run_all_benchmarks(
-    dataset: Dataset,
+    dataset: Dataset | DatasetCollection,
     *,
     train_ratio: float = 0.7,
     val_ratio: float = 0.15,
@@ -96,8 +125,8 @@ def run_all_benchmarks(
 
     Parameters
     ----------
-    dataset : Dataset
-        The full dataset.
+    dataset : Dataset | DatasetCollection
+        The full dataset (single or multiple experiments).
     train_ratio, val_ratio : float
         Split ratios.
     model_names : list | None
@@ -115,9 +144,21 @@ def run_all_benchmarks(
     list[dict]
         One result dict per model.
     """
-    train_ds, val_ds, test_ds = dataset.train_val_test_split(
-        train_ratio, val_ratio
-    )
+    if isinstance(dataset, DatasetCollection):
+        train_sets, val_sets, test_sets = dataset.train_val_test_split(
+            train_ratio, val_ratio
+        )
+    else:
+        train_ds, val_ds, test_ds = dataset.train_val_test_split(
+            train_ratio, val_ratio
+        )
+        train_sets = [train_ds]
+        val_sets = [val_ds]
+        test_sets = [test_ds]
+
+    train_data = _pack_pairs([(ds.u, ds.y) for ds in train_sets])
+    val_data = _pack_pairs([(ds.u, ds.y) for ds in val_sets])
+    test_data = _pack_pairs([(ds.u, ds.y) for ds in test_sets])
 
     names = model_names or list_models()
     overrides = config_overrides or {}
@@ -133,20 +174,21 @@ def run_all_benchmarks(
 
         result = run_single_benchmark(
             name,
-            train_data=(train_ds.u, train_ds.y),
-            test_data=(test_ds.u, test_ds.y),
-            val_data=(val_ds.u, val_ds.y),
+            train_data=train_data,
+            test_data=test_data,
+            val_data=val_data,
             config_overrides=overrides,
             logger=logger,
             verbose=verbose,
         )
         results.append(result)
 
-        if result["metrics"]:
-            if verbose:
-                skip = getattr(result["model"], "max_lag", 0)
-                y_pred = result["model"].predict(test_ds.u, test_ds.y, mode="FR")
-                print(summary(test_ds.y, y_pred, name, skip=skip))
+        if result["metrics"] and verbose:
+            m = result["metrics"]
+            print(
+                f"  RMSE={m['RMSE']:.6f}  FIT={m['FIT']:.4f}  "
+                f"R2={m['R2']:.4f}  t={result['train_time']:.1f}s"
+            )
         elif verbose:
             print(f"  ERROR: {result.get('error', 'unknown')}")
 

@@ -33,51 +33,71 @@ EPOCH_OVERRIDES: dict[str, int] = {
     "exponential_smoothing": 1,
     "random_forest": 1,
     # Simple NNs
-    "neural_network": 5,
-    "gru": 5,
-    "lstm": 5,
-    "tcn": 5,
-    "mamba": 5,
+    "neural_network": 200,
+    "gru": 200,
+    "lstm": 200,
+    "tcn": 200,
+    "mamba": 200,
     # Continuous-time
-    "neural_ode": 5,
-    "neural_sde": 5,
-    "neural_cde": 5,
+    "neural_ode": 300,
+    "neural_sde": 300,
+    "neural_cde": 200,
     # Physics / hybrid
-    "linear_physics": 10,
-    "stribeck_physics": 10,
-    "hybrid_linear_beam": 10,
-    "hybrid_nonlinear_cam": 10,
-    "ude": 5,
+    "linear_physics": 1000,
+    "stribeck_physics": 1000,
+    "hybrid_linear_beam": 600,
+    "hybrid_nonlinear_cam": 80,
+    "ude": 500,
     # Blackbox 2-D variants
-    "vanilla_node_2d": 5,
-    "structured_node": 5,
-    "adaptive_node": 5,
-    "vanilla_ncde_2d": 2,
-    "structured_ncde": 2,
-    "adaptive_ncde": 2,
-    "vanilla_nsde_2d": 3,
-    "structured_nsde": 3,
-    "adaptive_nsde": 3,
+    "vanilla_node_2d": 800,
+    "structured_node": 800,
+    "adaptive_node": 800,
+    "vanilla_ncde_2d": 30,
+    "structured_ncde": 30,
+    "adaptive_ncde": 30,
+    "vanilla_nsde_2d": 800,
+    "structured_nsde": 800,
+    "adaptive_nsde": 800,
 }
 
 DEFAULT_EPOCHS = 5
 
-# Overrides to keep heavyweight models fast during smoke test
+# Overrides tuned for convergence (R² > 0.9 target)
 CONFIG_OVERRIDES: dict[str, dict] = {
-    # Blackbox 2-D: smaller networks, fewer k_steps
-    "vanilla_node_2d":   {"k_steps": 5, "hidden_dim": 32, "batch_size": 32},
-    "structured_node":   {"k_steps": 5, "hidden_dim": 32, "batch_size": 32},
-    "adaptive_node":     {"k_steps": 5, "hidden_dim": 32, "batch_size": 32},
-    "vanilla_ncde_2d":   {"k_steps": 5, "hidden_dim": 32, "batch_size": 4},
-    "structured_ncde":   {"k_steps": 5, "hidden_dim": 32, "batch_size": 4},
-    "adaptive_ncde":     {"k_steps": 5, "hidden_dim": 32, "batch_size": 4},
-    "vanilla_nsde_2d":   {"k_steps": 5, "hidden_dim": 32, "batch_size": 32},
-    "structured_nsde":   {"k_steps": 5, "hidden_dim": 32, "batch_size": 32},
-    "adaptive_nsde":     {"k_steps": 5, "hidden_dim": 32, "batch_size": 32},
-    # Continuous-time: fewer sequences to keep it fast
-    "neural_ode":        {"sequences_per_epoch": 4},
-    "neural_sde":        {"sequences_per_epoch": 4},
-    "neural_cde":        {"sequences_per_epoch": 4},
+    # Blackbox 2-D ODE: lower LR, tighter grad_clip, moderate architecture
+    "vanilla_node_2d":   {"k_steps": 15, "hidden_dim": 64, "batch_size": 64, "learning_rate": 5e-4, "grad_clip": 1.0, "scheduler_patience": 30, "early_stopping_patience": 80},
+    "structured_node":   {"k_steps": 15, "hidden_dim": 64, "batch_size": 64, "learning_rate": 5e-4, "grad_clip": 1.0, "scheduler_patience": 30, "early_stopping_patience": 80},
+    "adaptive_node":     {"k_steps": 15, "hidden_dim": 64, "batch_size": 64, "learning_rate": 5e-4, "grad_clip": 1.0, "scheduler_patience": 30, "early_stopping_patience": 80},
+    # Blackbox 2-D CDE
+    "vanilla_ncde_2d":   {"k_steps": 10, "hidden_dim": 64, "batch_size": 8, "learning_rate": 1e-3, "grad_clip": 1.0},
+    "structured_ncde":   {"k_steps": 10, "hidden_dim": 64, "batch_size": 8, "learning_rate": 1e-3, "grad_clip": 1.0},
+    "adaptive_ncde":     {"k_steps": 10, "hidden_dim": 64, "batch_size": 8, "learning_rate": 1e-3, "grad_clip": 1.0},
+    # Blackbox 2-D SDE: lower LR, tighter grad_clip, small diffusion network
+    "vanilla_nsde_2d":   {"k_steps": 15, "hidden_dim": 64, "batch_size": 64, "learning_rate": 5e-4, "grad_clip": 1.0, "diffusion_hidden_dim": 16, "scheduler_patience": 40, "early_stopping_patience": 100},
+    "structured_nsde":   {"k_steps": 15, "hidden_dim": 64, "batch_size": 64, "learning_rate": 5e-4, "grad_clip": 1.0, "diffusion_hidden_dim": 16, "scheduler_patience": 40, "early_stopping_patience": 100},
+    "adaptive_nsde":     {"k_steps": 15, "hidden_dim": 64, "batch_size": 64, "learning_rate": 5e-4, "grad_clip": 1.0, "diffusion_hidden_dim": 16, "scheduler_patience": 40, "early_stopping_patience": 100},
+    # Continuous-time: more sequences, bigger networks
+    "neural_ode":        {"sequences_per_epoch": 16, "train_window_size": 50, "hidden_layers": [128, 128], "scheduler_patience": 20, "early_stopping_patience": 50},
+    "neural_sde":        {"sequences_per_epoch": 16, "train_window_size": 50, "scheduler_patience": 20, "early_stopping_patience": 50},
+    "neural_cde":        {"sequences_per_epoch": 16, "train_window_size": 50, "scheduler_patience": 20, "early_stopping_patience": 50, "learning_rate": 5e-3},
+    # UDE: longer windows, bigger NN
+    "ude":               {"train_window_size": 50, "hidden_layers": [128, 128], "scheduler_patience": 25, "early_stopping_patience": 60},
+    # Physics: longer windows for better gradient signal
+    "linear_physics":    {"train_window_size": 100, "learning_rate": 1e-2, "scheduler_patience": 50},
+    "stribeck_physics":  {"train_window_size": 100, "learning_rate": 1e-2, "scheduler_patience": 50},
+    # Hybrid: tuned LR + initial physics for stability
+    "hybrid_linear_beam":    {"learning_rate": 2e-3, "integration_substeps": 4, "scheduler_patience": 20, "early_stopping_patience": 60},
+    "hybrid_nonlinear_cam":  {"learning_rate": 5e-3, "integration_substeps": 20, "scheduler_patience": 15, "J": 0.1, "k": 10.0},
+    # Sequence models: LR scheduler active, early stopping
+    "gru":  {"scheduler_patience": 10, "early_stopping_patience": 40},
+    "lstm": {"scheduler_patience": 10, "early_stopping_patience": 40},
+    "tcn":  {"scheduler_patience": 10, "early_stopping_patience": 30},
+    "mamba": {"scheduler_patience": 10, "early_stopping_patience": 40},
+    # Classical: tune for FR stability
+    "narx": {"nu": 8, "ny": 8},
+    "neural_network": {"nu": 10, "ny": 10, "hidden_layers": [128, 128, 128], "scheduler_patience": 15, "early_stopping_patience": 30},
+    "arima": {"order": (1, 0, 1)},
+    "exponential_smoothing": {"trend": None},
 }
 
 # CDE models with adjoint backward are extremely slow even for 1 epoch
@@ -86,6 +106,7 @@ SLOW_MODELS = {"vanilla_ncde_2d", "structured_ncde", "adaptive_ncde"}
 
 def run_one(model_key: str, train_ds, val_ds, test_ds) -> dict:
     """Train + evaluate one model; return a summary dict."""
+    seed_all(42)  # Reset seed per model for reproducible results
     t0 = time.time()
 
     config_cls = get_config_class(model_key)

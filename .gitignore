@@ -6,3 +6,5 @@ wandb/
 checkpoints/
 plots/
 comparison/
+.pytest_cache/
+.ipynb_checkpoints/
