@@ -44,7 +44,7 @@ EPOCH_OVERRIDES: dict[str, int] = {
     "neural_cde": 200,
     # Physics / hybrid
     "linear_physics": 1000,
-    "stribeck_physics": 1000,
+    "stribeck_physics": 2000,
     "hybrid_linear_beam": 600,
     "hybrid_nonlinear_cam": 80,
     "ude": 500,
@@ -84,7 +84,7 @@ CONFIG_OVERRIDES: dict[str, dict] = {
     "ude":               {"train_window_size": 50, "hidden_layers": [128, 128], "scheduler_patience": 25, "early_stopping_patience": 60},
     # Physics: longer windows for better gradient signal
     "linear_physics":    {"train_window_size": 100, "learning_rate": 1e-2, "scheduler_patience": 50},
-    "stribeck_physics":  {"train_window_size": 100, "learning_rate": 1e-2, "scheduler_patience": 50},
+    "stribeck_physics":  {"solver": "rk4", "training_mode": "windowed", "train_window_size": 50, "learning_rate": 5e-3, "scheduler_patience": 30},
     # Hybrid: tuned LR + initial physics for stability
     "hybrid_linear_beam":    {"learning_rate": 2e-3, "integration_substeps": 4, "scheduler_patience": 20, "early_stopping_patience": 60},
     "hybrid_nonlinear_cam":  {"learning_rate": 5e-3, "integration_substeps": 20, "scheduler_patience": 15, "J": 0.1, "k": 10.0},
@@ -97,7 +97,7 @@ CONFIG_OVERRIDES: dict[str, dict] = {
     "narx": {"nu": 8, "ny": 8},
     "neural_network": {"nu": 10, "ny": 10, "hidden_layers": [128, 128, 128], "scheduler_patience": 15, "early_stopping_patience": 30},
     "arima": {"order": (1, 0, 1)},
-    "exponential_smoothing": {"trend": None},
+    "exponential_smoothing": {"trend": None, "seasonal": "add", "seasonal_periods": 21},
 }
 
 # CDE models with adjoint backward are extremely slow even for 1 epoch
