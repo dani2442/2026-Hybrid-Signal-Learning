@@ -37,6 +37,16 @@ class WandbLogger:
     def active(self) -> bool:
         return self._run is not None
 
+    def update_config(self, updates: Dict[str, Any]) -> None:
+        """Merge *updates* into the W&B run config (e.g. model hyperparams
+        discovered after the run is initialised)."""
+        if self._run is None:
+            return
+        try:
+            self._run.config.update(updates, allow_val_change=True)
+        except Exception:
+            pass
+
     def log_metrics(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
         if self._run is None:
             return

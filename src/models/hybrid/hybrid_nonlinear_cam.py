@@ -165,6 +165,27 @@ class HybridNonlinearCamModel(PickleStateMixin, BaseModel):
             optimizer.step()
             return loss.item()
 
+        # Build validation step (full val trajectory, no grad)
+        val_sfn = None
+        if val_data is not None:
+            u_val_norm = self._normalize_u(val_data[0])
+            y_val_norm = self._normalize_y(val_data[1])
+            n_val = len(u_val_norm)
+            t_val = torch.linspace(0, (n_val - 1) * dt, n_val, device=device)
+            u_func_val = make_u_func(u_val_norm, dt=dt, device=device)
+            n_state_v = n_state
+            y0_val_state = torch.zeros(n_state_v, dtype=torch.float32, device=device)
+            y0_val_state[0] = y_val_norm[0]
+            y_target_val = torch.tensor(y_val_norm, dtype=torch.float32, device=device)
+
+            def val_sfn() -> float:
+                self.nn_correction.eval()
+                with torch.no_grad():
+                    ys_v = self._integrate(
+                        y0_val_state, u_func_val, t_val, cfg.integration_substeps
+                    )
+                    return nn.functional.mse_loss(ys_v[:, 0], y_target_val).item()
+
         train_loop(
             step_fn,
             epochs=cfg.epochs,
@@ -174,6 +195,8 @@ class HybridNonlinearCamModel(PickleStateMixin, BaseModel):
             logger=logger,
             verbose=cfg.verbose,
             desc="HybridNonlinearCam",
+            val_step_fn=val_sfn,
+            model_params=all_params,
         )
 
     def _predict(self, u, *, y0=None) -> np.ndarray:

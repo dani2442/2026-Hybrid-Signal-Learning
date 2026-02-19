@@ -50,7 +50,7 @@ def run_single_benchmark(
         ``{"model_name": str, "metrics": {...}, "train_time": float,
           "model": BaseModel}``
     """
-    overrides = config_overrides or {}
+    overrides = dict(config_overrides or {})
     if verbose:
         overrides.setdefault("verbose", True)
 
@@ -65,6 +65,13 @@ def run_single_benchmark(
             "model": None,
         }
 
+    # Push model hyperparams into the W&B run config as soon as we have them
+    if logger is not None and hasattr(model, "config") and hasattr(model.config, "to_dict"):
+        try:
+            logger.update_config(model.config.to_dict())
+        except Exception:
+            pass
+
     t0 = time.time()
     try:
         model.fit(train_data, val_data=val_data, logger=logger)
@@ -78,8 +85,9 @@ def run_single_benchmark(
         }
     train_time = time.time() - t0
 
+    skip = getattr(model, "max_lag", 0)
+
     try:
-        skip = getattr(model, "max_lag", 0)
         y_true_parts: List[np.ndarray] = []
         y_pred_parts: List[np.ndarray] = []
 
@@ -97,14 +105,36 @@ def run_single_benchmark(
         return {
             "model_name": model_name,
             "metrics": None,
+            "val_metrics": None,
             "train_time": train_time,
             "error": str(exc),
             "model": model,
         }
 
+    # Compute validation metrics if val_data is provided
+    val_metrics = None
+    if val_data is not None:
+        try:
+            y_val_true_parts: List[np.ndarray] = []
+            y_val_pred_parts: List[np.ndarray] = []
+            for u_val, y_val in _to_pairs(val_data):
+                y_val_pred = model.predict(u_val, y_val, mode="FR")
+                n = min(len(y_val), len(y_val_pred))
+                start = min(skip, n)
+                y_val_true_parts.append(np.asarray(y_val)[start:n])
+                y_val_pred_parts.append(np.asarray(y_val_pred)[start:n])
+            val_metrics = compute_all(
+                np.concatenate(y_val_true_parts),
+                np.concatenate(y_val_pred_parts),
+                skip=0,
+            )
+        except Exception:
+            val_metrics = None
+
     return {
         "model_name": model_name,
         "metrics": metrics,
+        "val_metrics": val_metrics,
         "train_time": train_time,
         "model": model,
     }
@@ -117,6 +147,7 @@ def run_all_benchmarks(
     val_ratio: float = 0.15,
     model_names: List[str] | None = None,
     config_overrides: Dict[str, Any] | None = None,
+    per_model_config_overrides: Dict[str, Dict[str, Any]] | None = None,
     save_dir: Optional[str] = None,
     logger_factory=None,
     verbose: bool = True,
@@ -133,6 +164,9 @@ def run_all_benchmarks(
         Subset of model names; defaults to all registered.
     config_overrides : dict | None
         Overrides applied to every model's config.
+    per_model_config_overrides : dict[str, dict] | None
+        Additional overrides keyed by model name. These are merged on top
+        of ``config_overrides`` for each model.
     save_dir : str | None
         Directory to persist trained models.
     logger_factory : callable | None
@@ -162,6 +196,7 @@ def run_all_benchmarks(
 
     names = model_names or list_models()
     overrides = config_overrides or {}
+    per_model_overrides = per_model_config_overrides or {}
     results: List[Dict[str, Any]] = []
 
     for name in names:
@@ -172,12 +207,28 @@ def run_all_benchmarks(
 
         logger = logger_factory(name) if logger_factory else None
 
+        # Push dataset-level stats into the W&B run config
+        if logger is not None:
+            try:
+                dataset_config: dict = {
+                    "n_train": sum(int(ds.n_samples) for ds in train_sets),
+                    "n_val": sum(int(ds.n_samples) for ds in val_sets),
+                    "n_test": sum(int(ds.n_samples) for ds in test_sets),
+                    "dataset_names": [ds.name for ds in train_sets],
+                }
+                logger.update_config(dataset_config)
+            except Exception:
+                pass
+
         result = run_single_benchmark(
             name,
             train_data=train_data,
             test_data=test_data,
             val_data=val_data,
-            config_overrides=overrides,
+            config_overrides={
+                **overrides,
+                **per_model_overrides.get(name, {}),
+            },
             logger=logger,
             verbose=verbose,
         )
@@ -194,10 +245,38 @@ def run_all_benchmarks(
 
         if save_dir and result["model"] is not None:
             os.makedirs(save_dir, exist_ok=True)
-            result["model"].save(os.path.join(save_dir, f"{name}.pkl"))
+            try:
+                result["model"].save(os.path.join(save_dir, f"{name}.pkl"))
+            except Exception as save_err:
+                if verbose:
+                    print(f"  WARNING: could not save {name}: {save_err}")
 
         if logger is not None:
             try:
+                log_dict: dict = {}
+                summary_dict: dict = {}
+
+                if result.get("metrics"):
+                    for k, v in result["metrics"].items():
+                        log_dict[f"test/{k}"] = v
+                        summary_dict[f"test/{k}"] = v
+
+                if result.get("val_metrics"):
+                    for k, v in result["val_metrics"].items():
+                        log_dict[f"val/{k}"] = v
+                        summary_dict[f"val/{k}"] = v
+
+                train_time = result.get("train_time", 0.0)
+                log_dict["train_time"] = train_time
+                summary_dict["train_time"] = train_time
+
+                if log_dict:
+                    logger.log_metrics(log_dict)
+                if summary_dict:
+                    logger.log_summary(summary_dict)
+
+                if result.get("error"):
+                    logger.log_summary({"error": result["error"]})
                 logger.finish()
             except Exception:
                 pass

@@ -81,9 +81,21 @@ class NeuralNetworkModel(PickleStateMixin, BaseModel):
         input_dim = X.shape[1]
         self.network = _MLP(input_dim, cfg.hidden_layers, cfg.activation)
 
+        # Build validation feature matrices using training normalisation
+        val_feat = None
+        if val_data is not None:
+            u_v, y_v = val_data
+            if cfg.normalize:
+                u_v = self._normalize_u(np.asarray(u_v, dtype=np.float64).ravel())
+                y_v = self._normalize_y(np.asarray(y_v, dtype=np.float64).ravel())
+            X_val, y_val_t = create_lagged_features(y_v, u_v, cfg.ny, cfg.nu)
+            if X_val.shape[0] > 0:
+                val_feat = (X_val, y_val_t)
+
         train_supervised_torch_model(
             self.network, X, y_target,
             config=cfg, logger=logger, device=self.device,
+            val_data=val_feat,
         )
 
     @property

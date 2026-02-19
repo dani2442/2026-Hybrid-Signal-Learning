@@ -168,6 +168,35 @@ class NeuralCDEModel(PickleStateMixin, BaseModel):
 
             return total_loss / seqs
 
+        # Build validation step (full val trajectory, no grad)
+        val_sfn = None
+        if val_data is not None:
+            u_val_norm = self._normalize_u(val_data[0])
+            y_val_norm = self._normalize_y(val_data[1])
+            n_val = len(u_val_norm)
+            dt_v = dt
+            u_vt = torch.tensor(u_val_norm, dtype=torch.float32, device=device)
+            y_vt = torch.tensor(y_val_norm, dtype=torch.float32, device=device)
+            t_vt = torch.linspace(0, (n_val - 1) * dt_v, n_val, device=device)
+            solver_v = cfg.solver if cfg.solver != "euler" else "euler"
+
+            def val_sfn() -> float:
+                self.cde_func.eval()
+                self.initial_net.eval()
+                self.output_net.eval()
+                with torch.no_grad():
+                    X_p = self._make_path(u_vt, y_vt, t_vt, device)
+                    x0_v = X_p.evaluate(t_vt[0]).squeeze(0)
+                    z0_v = self.initial_net(x0_v)
+                    if z0_v.dim() == 1:
+                        z0_v = z0_v.unsqueeze(0)
+                    z_T_v = torchcde.cdeint(
+                        X=X_p, z0=z0_v, func=self.cde_func,
+                        t=t_vt, method=solver_v,
+                    )
+                    y_p = self.output_net(z_T_v.squeeze(0)).squeeze(-1)
+                    return nn.functional.mse_loss(y_p, y_vt).item()
+
         train_loop(
             step_fn,
             epochs=cfg.epochs,
@@ -177,6 +206,8 @@ class NeuralCDEModel(PickleStateMixin, BaseModel):
             logger=logger,
             verbose=cfg.verbose,
             desc="NeuralCDE",
+            val_step_fn=val_sfn,
+            model_params=all_params,
         )
 
     def _predict(self, u, *, y0=None) -> np.ndarray:

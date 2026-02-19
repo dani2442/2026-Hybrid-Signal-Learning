@@ -186,6 +186,26 @@ class UDEModel(PickleStateMixin, BaseModel):
                     total += loss.item()
                 return total / n_seqs
 
+        # Build validation step (full val trajectory, no grad)
+        val_sfn = None
+        if val_data is not None:
+            u_val_norm = self._normalize_u(val_data[0])
+            y_val_norm = self._normalize_y(val_data[1])
+            n_val = len(u_val_norm)
+            t_val = torch.linspace(0, (n_val - 1) * dt, n_val, device=device)
+            u_func_val = make_u_func(u_val_norm, dt=dt, device=device)
+            y0_val_t = torch.tensor([[y_val_norm[0]]], dtype=torch.float32, device=device)
+            y_target_val = torch.tensor(y_val_norm, dtype=torch.float32, device=device)
+
+            def val_sfn() -> float:
+                self.ude_func.set_u_func(u_func_val)
+                self.ude_func.eval()
+                with torch.no_grad():
+                    ys_v = solver_fn(self.ude_func, y0_val_t, t_val)
+                    return nn.functional.mse_loss(
+                        ys_v.squeeze()[:n_val], y_target_val
+                    ).item()
+
         train_loop(
             step_fn,
             epochs=cfg.epochs,
@@ -195,6 +215,8 @@ class UDEModel(PickleStateMixin, BaseModel):
             logger=logger,
             verbose=cfg.verbose,
             desc="UDE",
+            val_step_fn=val_sfn,
+            model_params=list(self.ude_func.parameters()),
         )
 
     def _predict(self, u, *, y0=None) -> np.ndarray:

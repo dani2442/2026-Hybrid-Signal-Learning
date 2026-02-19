@@ -189,6 +189,32 @@ class NeuralODEModel(PickleStateMixin, BaseModel):
                 total_loss += loss.item()
             return total_loss / seqs_per_epoch
 
+        # Build validation step (full val trajectory, no grad)
+        val_sfn = None
+        if val_data is not None:
+            u_val_norm = self._normalize_u(val_data[0])
+            y_val_norm = self._normalize_y(val_data[1])
+            n_val = len(u_val_norm)
+            t_val = torch.linspace(0, (n_val - 1) * dt, n_val, device=device)
+            u_func_val = make_u_func(u_val_norm, dt=dt, device=device)
+            y0_val = torch.tensor(
+                [y_val_norm[0]], dtype=torch.float32, device=device
+            ).unsqueeze(0)
+            y_target_val = torch.tensor(
+                y_val_norm, dtype=torch.float32, device=device
+            )
+            drift_ref = self.drift_net
+
+            def val_sfn() -> float:
+                drift_ref.eval()
+                with torch.no_grad():
+                    y_p = _integrate(
+                        drift_ref, y0_val, u_func_val, t_val, cfg.solver, device
+                    )
+                    return nn.functional.mse_loss(
+                        y_p.squeeze()[:n_val], y_target_val
+                    ).item()
+
         train_loop(
             step_fn,
             epochs=cfg.epochs,
@@ -198,6 +224,8 @@ class NeuralODEModel(PickleStateMixin, BaseModel):
             logger=logger,
             verbose=cfg.verbose,
             desc="NeuralODE",
+            val_step_fn=val_sfn,
+            model_params=list(self.drift_net.parameters()),
         )
 
     def _predict(self, u, *, y0=None) -> np.ndarray:

@@ -8,7 +8,7 @@ neural model can call with a custom ``step_fn``.
 from __future__ import annotations
 
 import math
-from typing import Callable, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 import numpy as np
 import torch
@@ -117,6 +117,9 @@ def train_loop(
     log_every: int = 1,
     verbose: bool = True,
     desc: str = "Training",
+    val_step_fn: Optional[Callable[[], float]] = None,
+    val_metrics_fn: Optional[Callable[[], Dict[str, float]]] = None,
+    model_params=None,
 ) -> List[float]:
     """Run a generic epoch loop.
 
@@ -134,13 +137,23 @@ def train_loop(
     early_stopper : EarlyStopper | None
         Checked every epoch.
     logger : WandbLogger | None
-        Receives ``loss`` and ``lr`` per epoch.
+        Receives ``train_loss``, ``val_loss``, ``lr``, ``grad_norm`` per epoch.
     log_every : int
         Log every N epochs.
     verbose : bool
         Show tqdm progress bar.
     desc : str
         Label for the progress bar.
+    val_step_fn : callable() -> float | None
+        If provided, called every ``log_every`` epochs to compute validation
+        loss logged as ``val_loss``.
+    val_metrics_fn : callable() -> dict | None
+        If provided, called every ``log_every`` epochs to compute a full
+        set of validation metrics (R2, RMSE, MAE, FIT …).  The returned
+        dict is merged directly into the per-epoch log, so use prefixed
+        keys such as ``val/R2``, ``val/RMSE``, etc.
+    model_params : iterable | None
+        If provided, gradient norm is computed and logged as ``grad_norm``.
 
     Returns
     -------
@@ -175,9 +188,15 @@ def train_loop(
             pbar.set_postfix(loss=f"{loss:.6f}", lr=lr_str)
 
         if logger is not None and (epoch + 1) % log_every == 0:
-            metrics = {"loss": loss, "epoch": epoch}
+            metrics: Dict[str, float] = {"train_loss": loss, "epoch": epoch}
             if optimizer is not None:
                 metrics["lr"] = optimizer.param_groups[0]["lr"]
+            if val_step_fn is not None:
+                metrics["val_loss"] = val_step_fn()
+            if val_metrics_fn is not None:
+                metrics.update(val_metrics_fn())
+            if model_params is not None:
+                metrics["grad_norm"] = gradient_norm(model_params)
             logger.log_metrics(metrics, step=epoch)
 
     return losses
@@ -195,6 +214,7 @@ def train_supervised_torch_model(
     config: BaseConfig,
     logger=None,
     device: str = "cpu",
+    val_data: Optional[tuple] = None,
 ) -> List[float]:
     """Batch-SGD training for feed-forward PyTorch models.
 
@@ -210,6 +230,8 @@ def train_supervised_torch_model(
         ``verbose``.
     logger : WandbLogger | None
     device : str
+    val_data : tuple | None
+        (X_val, y_val) feature matrices for validation loss logging.
 
     Returns
     -------
@@ -233,6 +255,27 @@ def train_supervised_torch_model(
     )
     stopper = EarlyStopper(config.early_stopping_patience)
     criterion = nn.MSELoss()
+
+    # Build validation step + metrics functions from pre-built feature matrices
+    val_sfn = None
+    val_metrics_fn = None
+    if val_data is not None:
+        X_val, y_val = val_data
+        X_v = torch.tensor(X_val, dtype=torch.float32, device=device)
+        y_v = torch.tensor(y_val, dtype=torch.float32, device=device).unsqueeze(-1)
+
+        def val_sfn() -> float:
+            model.eval()
+            with torch.no_grad():
+                return criterion(model(X_v), y_v).item()
+
+        def val_metrics_fn() -> Dict[str, float]:
+            from src.validation.metrics import compute_all
+            model.eval()
+            with torch.no_grad():
+                pred_np = model(X_v).cpu().numpy().ravel()
+            y_np = y_v.cpu().numpy().ravel()
+            return {f"val/{k}": float(v) for k, v in compute_all(y_np, pred_np).items()}
 
     def step_fn(_epoch: int) -> float:
         model.train()
@@ -259,6 +302,9 @@ def train_supervised_torch_model(
         log_every=getattr(config, "wandb_log_every", 1),
         verbose=config.verbose,
         desc=f"Training (supervised)",
+        val_step_fn=val_sfn,
+        val_metrics_fn=val_metrics_fn,
+        model_params=list(model.parameters()),
     )
 
 
@@ -352,6 +398,36 @@ def train_sequence_model(
     stopper = EarlyStopper(config.early_stopping_patience)
     criterion = nn.MSELoss()
 
+    # Build validation step + metrics functions (val_data is already normalised by the caller)
+    val_sfn = None
+    val_metrics_fn = None
+    if val_data is not None:
+        u_val_arr, y_val_arr = val_data
+        u_val_t = (
+            torch.tensor(np.asarray(u_val_arr, dtype=np.float32).ravel(),
+                         dtype=torch.float32, device=device)
+            .unsqueeze(0).unsqueeze(-1)
+        )
+        y_val_t = (
+            torch.tensor(np.asarray(y_val_arr, dtype=np.float32).ravel(),
+                         dtype=torch.float32, device=device)
+            .unsqueeze(0).unsqueeze(-1)
+        )
+
+        def val_sfn() -> float:
+            model.eval()
+            with torch.no_grad():
+                pred_v = model(u_val_t)
+                return criterion(pred_v, y_val_t).item()
+
+        def val_metrics_fn() -> Dict[str, float]:
+            from src.validation.metrics import compute_all
+            model.eval()
+            with torch.no_grad():
+                pred_np = model(u_val_t).cpu().numpy().ravel()
+            y_np = y_val_t.cpu().numpy().ravel()
+            return {f"val/{k}": float(v) for k, v in compute_all(y_np, pred_np).items()}
+
     def step_fn(_epoch: int) -> float:
         model.train()
         total_loss = 0.0
@@ -379,6 +455,9 @@ def train_sequence_model(
         log_every=getattr(config, "wandb_log_every", 1),
         verbose=config.verbose,
         desc=f"Training (sequence)",
+        val_step_fn=val_sfn,
+        val_metrics_fn=val_metrics_fn,
+        model_params=list(model.parameters()),
     )
 
 
@@ -396,6 +475,8 @@ def train_sequence_batches(
     optimizer: torch.optim.Optimizer,
     logger=None,
     device: str = "cpu",
+    val_step_fn: Optional[Callable[[], float]] = None,
+    model_params=None,
 ) -> List[float]:
     """Epoch loop for continuous-time models with subsequence batching.
 
@@ -414,6 +495,11 @@ def train_sequence_batches(
     optimizer : Optimizer
     logger : WandbLogger | None
     device : str
+    val_step_fn : callable() -> float | None
+        If provided, called every ``log_every`` epochs to compute validation
+        loss, logged as ``val_loss``.
+    model_params : iterable | None
+        If provided, gradient norm is computed and logged as ``grad_norm``.
 
     Returns
     -------
@@ -467,6 +553,8 @@ def train_sequence_batches(
         log_every=getattr(config, "wandb_log_every", 1),
         verbose=config.verbose,
         desc="Training (continuous)",
+        val_step_fn=val_step_fn,
+        model_params=model_params,
     )
 
 

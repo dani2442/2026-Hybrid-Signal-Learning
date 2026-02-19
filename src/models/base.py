@@ -39,7 +39,13 @@ class PickleStateMixin:
             if isinstance(val, torch.Tensor):
                 state[key] = val.detach().cpu()
             elif isinstance(val, torch.nn.Module):
-                state[key] = val.cpu()
+                val = val.cpu()
+                state[key] = val
+                # Clear unpicklable closure attributes (e.g. _u_func set via
+                # set_u_func()) from this module and all its submodules.
+                for mod in val.modules():
+                    if hasattr(mod, "_u_func"):
+                        mod._u_func = None
         return state
 
     def __setstate__(self, state: Dict[str, Any]) -> None:

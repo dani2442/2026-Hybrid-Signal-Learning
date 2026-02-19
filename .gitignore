@@ -7,3 +7,4 @@ plots/
 comparison/
 .pytest_cache/
 .ipynb_checkpoints/
+trained_models/

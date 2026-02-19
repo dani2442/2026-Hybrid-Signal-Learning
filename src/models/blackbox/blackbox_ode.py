@@ -107,7 +107,6 @@ class _BlackboxODE2DBase(PickleStateMixin, BaseModel):
             for y0_b, yt_b, u_b in loader:
                 # y0_b: [B, 2], yt_b: [B, k+1], u_b: [B, k, 1]
                 optimizer.zero_grad()
-                batch_size_actual = y0_b.shape[0]
 
                 # Euler k-step integration
                 y_pred = [y0_b]
@@ -129,6 +128,36 @@ class _BlackboxODE2DBase(PickleStateMixin, BaseModel):
                 count += 1
             return total / max(count, 1)
 
+        # Build validation step (full val trajectory Euler integration, no grad)
+        val_sfn = None
+        if val_data is not None:
+            u_val_norm = self._normalize_u(val_data[0])
+            y_val_norm = self._normalize_y(val_data[1])
+            n_val = len(u_val_norm)
+            u_val_t = torch.tensor(
+                np.asarray(u_val_norm, dtype=np.float32).ravel(),
+                dtype=torch.float32, device=device,
+            )
+            y_val_t = torch.tensor(
+                np.asarray(y_val_norm, dtype=np.float32).ravel(),
+                dtype=torch.float32, device=device,
+            )
+
+            def val_sfn() -> float:
+                self.ode_func.eval()
+                with torch.no_grad():
+                    state_v = torch.tensor(
+                        [[y_val_norm[0], 0.0]], dtype=torch.float32, device=device
+                    )
+                    preds_v = [state_v[:, 0]]
+                    for i in range(n_val - 1):
+                        u_i = u_val_t[i:i + 1].unsqueeze(-1)
+                        dydt_v = self.ode_func(state_v, u_i)
+                        state_v = state_v + dt * dydt_v
+                        preds_v.append(state_v[:, 0])
+                    y_pred_v = torch.cat(preds_v, dim=0)
+                    return nn.functional.mse_loss(y_pred_v, y_val_t).item()
+
         train_loop(
             step_fn,
             epochs=cfg.epochs,
@@ -138,6 +167,8 @@ class _BlackboxODE2DBase(PickleStateMixin, BaseModel):
             logger=logger,
             verbose=cfg.verbose,
             desc=f"{self.name}",
+            val_step_fn=val_sfn,
+            model_params=list(self.ode_func.parameters()),
         )
 
     def _predict(self, u, *, y0=None) -> np.ndarray:

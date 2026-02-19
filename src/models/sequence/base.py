@@ -40,6 +40,15 @@ class SequenceModel(PickleStateMixin, BaseModel):
 
         self.network = self._build_network()
 
+        # Normalise validation data using training-set statistics
+        val_data_norm = None
+        if val_data is not None:
+            u_v, y_v = val_data
+            val_data_norm = (
+                self._normalize_u(np.asarray(u_v, dtype=np.float64).ravel()),
+                self._normalize_y(np.asarray(y_v, dtype=np.float64).ravel()),
+            )
+
         train_sequence_model(
             self.network,
             u_norm,
@@ -47,7 +56,7 @@ class SequenceModel(PickleStateMixin, BaseModel):
             config=self.config,
             logger=logger,
             device=self.device,
-            val_data=val_data,
+            val_data=val_data_norm,
         )
 
     def _predict(self, u, *, y0=None) -> np.ndarray:

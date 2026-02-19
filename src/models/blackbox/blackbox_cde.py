@@ -149,6 +149,31 @@ class _BlackboxCDE2DBase(PickleStateMixin, BaseModel):
 
             return total / n_batches
 
+        # Build validation step (full val trajectory, no grad)
+        val_sfn = None
+        if val_data is not None:
+            u_val_norm = self._normalize_u(val_data[0])
+            y_val_norm = self._normalize_y(val_data[1])
+            n_val = len(u_val_norm)
+            u_vt = torch.tensor(u_val_norm, dtype=torch.float32, device=device)
+            t_vt = torch.linspace(0, (n_val - 1) * dt, n_val, device=device)
+            z0_val = torch.tensor(
+                [[y_val_norm[0], 0.0]], dtype=torch.float32, device=device
+            )
+            y_target_val = torch.tensor(y_val_norm, dtype=torch.float32, device=device)
+
+            def val_sfn() -> float:
+                self.cde_func.eval()
+                self.output_net.eval()
+                with torch.no_grad():
+                    X_p = self._make_path(u_vt, t_vt, device)
+                    z_p = torchcde.cdeint(
+                        X=X_p, z0=z0_val, func=self.cde_func,
+                        t=t_vt, method="rk4",
+                    )
+                    y_p = self.output_net(z_p.squeeze(0)).squeeze(-1)
+                    return nn.functional.mse_loss(y_p, y_target_val).item()
+
         train_loop(
             step_fn,
             epochs=cfg.epochs,
@@ -158,6 +183,8 @@ class _BlackboxCDE2DBase(PickleStateMixin, BaseModel):
             logger=logger,
             verbose=cfg.verbose,
             desc=f"{self.name}",
+            val_step_fn=val_sfn,
+            model_params=all_params,
         )
 
     def _predict(self, u, *, y0=None) -> np.ndarray:
