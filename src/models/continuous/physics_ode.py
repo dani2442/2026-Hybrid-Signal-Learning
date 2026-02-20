@@ -255,7 +255,9 @@ class _StribeckODE(nn.Module):
         yd = state[..., 1:2]
 
         # Stribeck friction: F = (Fc + (Fs - Fc) * exp(-(v/vs)^2)) * sign(v)
-        friction = (fc + (fs - fc) * torch.exp(-(yd / vs) ** 2)) * torch.sign(yd)
+        # Use smooth tanh approximation of sign() for proper gradient flow
+        smooth_sign = torch.tanh(yd / (vs * 0.1 + 1e-6))
+        friction = (fc + (fs - fc) * torch.exp(-(yd / vs) ** 2)) * smooth_sign
 
         ydd = -2 * zeta * wn * yd - wn ** 2 * y - friction + gain * u_val
         return torch.cat([yd, ydd], dim=-1)

@@ -96,11 +96,10 @@ class NeuralCDEModel(PickleStateMixin, BaseModel):
         u_norm = self._normalize_u(u)
         y_norm = self._normalize_y(y)
 
-        input_dim = cfg.input_dim  # channels in path
         hidden_dim = cfg.hidden_dim
 
-        # Path channels: [time, u, y] = 3 during training
-        path_channels = 3
+        # Path channels: [time, u] — must match prediction (no y)
+        path_channels = cfg.input_dim
         self.cde_func = _CDEFunc(hidden_dim, path_channels).to(device)
         self.initial_net = nn.Linear(path_channels, hidden_dim).to(device)
         self.output_net = nn.Linear(hidden_dim, 1).to(device)
@@ -141,7 +140,7 @@ class NeuralCDEModel(PickleStateMixin, BaseModel):
                 n_sub = len(u_sub)
                 t_sub = torch.linspace(0, (n_sub - 1) * dt, n_sub, device=device)
 
-                X_path = self._make_path(u_sub, y_sub, t_sub, device)
+                X_path = self._make_path(u_sub, None, t_sub, device)
 
                 # Initial hidden state from first observation
                 x0 = X_path.evaluate(t_sub[0]).squeeze(0)
@@ -185,7 +184,7 @@ class NeuralCDEModel(PickleStateMixin, BaseModel):
                 self.initial_net.eval()
                 self.output_net.eval()
                 with torch.no_grad():
-                    X_p = self._make_path(u_vt, y_vt, t_vt, device)
+                    X_p = self._make_path(u_vt, None, t_vt, device)
                     x0_v = X_p.evaluate(t_vt[0]).squeeze(0)
                     z0_v = self.initial_net(x0_v)
                     if z0_v.dim() == 1:
@@ -225,9 +224,7 @@ class NeuralCDEModel(PickleStateMixin, BaseModel):
         u_t = torch.tensor(u_norm, dtype=torch.float32, device=device)
         t_t = torch.linspace(0, (N - 1) * dt, N, device=device)
 
-        # For prediction, use zeros as placeholder for y in path
-        y_placeholder = torch.zeros(N, dtype=torch.float32, device=device)
-        X_path = self._make_path(u_t, y_placeholder, t_t, device)
+        X_path = self._make_path(u_t, None, t_t, device)
 
         x0 = X_path.evaluate(t_t[0]).squeeze(0)
         z0 = self.initial_net(x0)

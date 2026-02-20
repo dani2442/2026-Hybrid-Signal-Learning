@@ -114,8 +114,12 @@ class _BlackboxSDE2DBase(PickleStateMixin, BaseModel):
             np.lib.stride_tricks.sliding_window_view(y_arr, k + 1)[:n_win],
             dtype=torch.float32, device=device,
         )
+        u_windows = torch.tensor(
+            np.lib.stride_tricks.sliding_window_view(u_arr, k)[:n_win],
+            dtype=torch.float32, device=device,
+        ).unsqueeze(-1)  # [n_win, k, 1]
 
-        dataset = torch.utils.data.TensorDataset(y0_all, y_target_all)
+        dataset = torch.utils.data.TensorDataset(y0_all, y_target_all, u_windows)
         loader = torch.utils.data.DataLoader(
             dataset, batch_size=cfg.batch_size, shuffle=True, drop_last=True
         )
@@ -125,13 +129,14 @@ class _BlackboxSDE2DBase(PickleStateMixin, BaseModel):
             diff.train()
             total = 0.0
             count = 0
-            for y0_b, yt_b in loader:
-                B = y0_b.shape[0]
-                # Pick random start index and build u_func for this window
-                start = np.random.randint(0, max(n_win, 1))
-                u_sub = u_arr[start: start + k]
-                u_func = make_u_func(u_sub, dt=dt, device=device)
-                self.sde_wrapper.set_u_func(u_func)
+            for y0_b, yt_b, u_b in loader:
+                # u_b: [B, k, 1] — per-sample u windows aligned with y0_b
+                def _batch_u_func(t, _u_b=u_b, _dt=dt, _k=k):
+                    t_val = t.item() if isinstance(t, torch.Tensor) else float(t)
+                    idx = min(max(int(t_val / _dt), 0), _k - 1)
+                    return _u_b[:, idx, :]  # [B, 1]
+
+                self.sde_wrapper.set_u_func(_batch_u_func)
 
                 t_span = torch.linspace(0, k * dt, k + 1, device=device)
 

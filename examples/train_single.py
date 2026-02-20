@@ -62,7 +62,8 @@ def main() -> None:
     parser.add_argument("--train-ratio", type=float, default=0.7)
     parser.add_argument("--val-ratio", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="Override epochs (default: use model config)")
     parser.add_argument("--save-dir", type=str, default="trained_models")
     parser.add_argument("--wandb-project", type=str, default="hybrid-learning")
     args = parser.parse_args()

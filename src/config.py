@@ -192,7 +192,7 @@ class NeuralSDEConfig(BaseConfig):
 
 @dataclass
 class NeuralCDEConfig(BaseConfig):
-    hidden_dim: int = 32
+    hidden_dim: int = 64
     input_dim: int = 2
     hidden_layers: List[int] = field(default_factory=lambda: [64, 64])
     interpolation: str = "cubic"
@@ -211,18 +211,20 @@ class NeuralCDEConfig(BaseConfig):
 class LinearPhysicsConfig(BaseConfig):
     dt: float = 0.05
     solver: str = "euler"
-    epochs: int = 1000
+    learning_rate: float = 3e-3
+    epochs: int = 2000
     train_window_size: int = 50
-    training_mode: str = "full"
+    training_mode: str = "subsequence"
 
 
 @dataclass
 class StribeckPhysicsConfig(BaseConfig):
     dt: float = 0.05
     solver: str = "euler"
-    epochs: int = 1000
+    learning_rate: float = 3e-3
+    epochs: int = 2000
     train_window_size: int = 50
-    training_mode: str = "full"
+    training_mode: str = "subsequence"
 
 
 @dataclass
@@ -234,6 +236,7 @@ class HybridLinearBeamConfig(BaseConfig):
     epochs: int = 600
     learning_rate: float = 1e-2
     integration_substeps: int = 1
+    training_mode: str = "subsequence"
 
 
 @dataclass
@@ -267,7 +270,7 @@ class UDEConfig(BaseConfig):
     solver: str = "euler"
     epochs: int = 1000
     train_window_size: int = 50
-    training_mode: str = "full"
+    training_mode: str = "subsequence"
     activation: str = "selu"
 
 
