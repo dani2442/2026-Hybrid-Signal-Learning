@@ -175,7 +175,6 @@ class NeuralODEConfig(BaseConfig):
     train_window_size: int = 50
     sequences_per_epoch: int = 24
     activation: str = "selu"
-    training_mode: str = "subsequence"
 
 
 @dataclass
@@ -214,7 +213,6 @@ class LinearPhysicsConfig(BaseConfig):
     learning_rate: float = 3e-3
     epochs: int = 2000
     train_window_size: int = 50
-    training_mode: str = "subsequence"
 
 
 @dataclass
@@ -224,7 +222,6 @@ class StribeckPhysicsConfig(BaseConfig):
     learning_rate: float = 3e-3
     epochs: int = 2000
     train_window_size: int = 50
-    training_mode: str = "subsequence"
 
 
 @dataclass
@@ -236,7 +233,6 @@ class HybridLinearBeamConfig(BaseConfig):
     epochs: int = 600
     learning_rate: float = 1e-2
     integration_substeps: int = 1
-    training_mode: str = "subsequence"
 
 
 @dataclass
@@ -270,7 +266,6 @@ class UDEConfig(BaseConfig):
     solver: str = "euler"
     epochs: int = 1000
     train_window_size: int = 50
-    training_mode: str = "subsequence"
     activation: str = "selu"
 
 

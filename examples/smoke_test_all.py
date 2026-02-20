@@ -49,7 +49,7 @@ CONFIG_OVERRIDES: dict[str, dict] = {
     "ude":               {"epochs": 500, "train_window_size": 50, "hidden_layers": [128, 128], "scheduler_patience": 25, "early_stopping_patience": 60},
     # Physics: longer windows for better gradient signal
     "linear_physics":    {"epochs": 1000, "train_window_size": 100, "learning_rate": 1e-2, "scheduler_patience": 50},
-    "stribeck_physics":  {"epochs": 2000, "solver": "rk4", "training_mode": "windowed", "train_window_size": 50, "learning_rate": 5e-3, "scheduler_patience": 30},
+    "stribeck_physics":  {"epochs": 2000, "solver": "rk4", "train_window_size": 50, "learning_rate": 5e-3, "scheduler_patience": 30},
     # Hybrid: tuned LR + initial physics for stability
     "hybrid_linear_beam":    {"epochs": 600, "learning_rate": 2e-3, "integration_substeps": 4, "scheduler_patience": 20, "early_stopping_patience": 60},
     "hybrid_nonlinear_cam":  {"epochs": 80, "learning_rate": 5e-3, "integration_substeps": 20, "scheduler_patience": 15, "J": 0.1, "k": 10.0},

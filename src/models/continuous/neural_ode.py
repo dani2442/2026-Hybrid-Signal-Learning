@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 
 from src.config import NeuralODEConfig
+from src.data.torch_datasets import WindowedTrainDataset
 from src.models.base import BaseModel, PickleStateMixin
 from src.models.continuous.interpolation import make_u_func
 from src.models.registry import register_model
@@ -154,26 +155,24 @@ class NeuralODEModel(PickleStateMixin, BaseModel):
         window = cfg.train_window_size
         seqs_per_epoch = cfg.sequences_per_epoch
 
+        dataset = WindowedTrainDataset(
+            u_norm, y_norm, window, samples_per_epoch=seqs_per_epoch
+        )
+        loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
+
         def step_fn(epoch: int) -> float:
             self.drift_net.train()
             total_loss = 0.0
-            for _ in range(seqs_per_epoch):
-                max_start = max(N - window, 1)
-                start = np.random.randint(0, max_start)
-                end = min(start + window, N)
-
-                u_sub = u_norm[start:end]
-                y_sub = y_norm[start:end]
-                n_sub = len(u_sub)
+            count = 0
+            for u_sub, y_sub in loader:
+                u_sub = u_sub.squeeze(0).to(device)
+                y_sub = y_sub.squeeze(0).to(device)
+                n_sub = u_sub.shape[0]
                 t_sub = torch.linspace(0, (n_sub - 1) * dt, n_sub, device=device)
 
                 u_func = make_u_func(u_sub, dt=dt, device=device)
-                y0 = torch.tensor(
-                    [y_sub[0]], dtype=torch.float32, device=device
-                ).unsqueeze(0)
-                y_target = torch.tensor(
-                    y_sub, dtype=torch.float32, device=device
-                )
+                y0 = y_sub[0:1].unsqueeze(0)
+                y_target = y_sub
 
                 optimizer.zero_grad()
                 y_pred = _integrate(
@@ -187,7 +186,8 @@ class NeuralODEModel(PickleStateMixin, BaseModel):
                 )
                 optimizer.step()
                 total_loss += loss.item()
-            return total_loss / seqs_per_epoch
+                count += 1
+            return total_loss / max(count, 1)
 
         # Build validation step (full val trajectory, no grad)
         val_sfn = None

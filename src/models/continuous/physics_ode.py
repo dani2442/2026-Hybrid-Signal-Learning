@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.config import LinearPhysicsConfig, StribeckPhysicsConfig
+from src.data.torch_datasets import WindowedTrainDataset
 from src.models.base import BaseModel, PickleStateMixin
 from src.models.continuous.interpolation import make_u_func
 from src.models.registry import register_model
@@ -116,54 +117,34 @@ class LinearPhysicsModel(PickleStateMixin, BaseModel):
         window = cfg.train_window_size
         solver_fn = _SOLVERS.get(cfg.solver, _euler)
 
-        training_mode = cfg.training_mode
+        dataset = WindowedTrainDataset(u_norm, y_norm, window)
+        loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
 
         def step_fn(epoch: int) -> float:
             self.ode_func.train()
-            if training_mode == "full":
-                t_span = torch.linspace(0, (N - 1) * dt, N, device=device)
-                u_func = make_u_func(u_norm, dt=dt, device=device)
+            total = 0.0
+            count = 0
+            for u_sub, y_sub in loader:
+                u_sub = u_sub.squeeze(0).to(device)
+                y_sub = y_sub.squeeze(0).to(device)
+                n = u_sub.shape[0]
+                t_sub = torch.linspace(0, (n - 1) * dt, n, device=device)
+
+                u_func = make_u_func(u_sub, dt=dt, device=device)
                 self.ode_func.set_u_func(u_func)
 
-                y0_state = torch.tensor(
-                    [y_norm[0], 0.0], dtype=torch.float32, device=device
-                )
-                y_target = torch.tensor(y_norm, dtype=torch.float32, device=device)
+                y0_state = torch.stack([y_sub[0], torch.zeros(1, device=device).squeeze()])
+                y_target = y_sub
 
                 optimizer.zero_grad()
-                ys = solver_fn(self.ode_func, y0_state, t_span)
+                ys = solver_fn(self.ode_func, y0_state, t_sub)
                 loss = nn.functional.mse_loss(ys[:, 0], y_target)
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.ode_func.parameters(), cfg.grad_clip)
                 optimizer.step()
-                return loss.item()
-            else:
-                total = 0.0
-                n_seqs = max(1, N // window)
-                for _ in range(n_seqs):
-                    start = np.random.randint(0, max(N - window, 1))
-                    end = min(start + window, N)
-                    u_sub = u_norm[start:end]
-                    y_sub = y_norm[start:end]
-                    n = len(u_sub)
-                    t_sub = torch.linspace(0, (n - 1) * dt, n, device=device)
-
-                    u_func = make_u_func(u_sub, dt=dt, device=device)
-                    self.ode_func.set_u_func(u_func)
-
-                    y0_state = torch.tensor(
-                        [y_sub[0], 0.0], dtype=torch.float32, device=device
-                    )
-                    y_target = torch.tensor(y_sub, dtype=torch.float32, device=device)
-
-                    optimizer.zero_grad()
-                    ys = solver_fn(self.ode_func, y0_state, t_sub)
-                    loss = nn.functional.mse_loss(ys[:, 0], y_target)
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(self.ode_func.parameters(), cfg.grad_clip)
-                    optimizer.step()
-                    total += loss.item()
-                return total / n_seqs
+                total += loss.item()
+                count += 1
+            return total / max(count, 1)
 
         # Build validation step (full val trajectory, no grad)
         val_sfn = None
@@ -289,54 +270,35 @@ class StribeckPhysicsModel(PickleStateMixin, BaseModel):
         dt = cfg.dt
         window = cfg.train_window_size
         solver_fn = _SOLVERS.get(cfg.solver, _euler)
-        training_mode = cfg.training_mode
+
+        dataset = WindowedTrainDataset(u_norm, y_norm, window)
+        loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
 
         def step_fn(epoch: int) -> float:
             self.ode_func.train()
-            if training_mode == "full":
-                t_span = torch.linspace(0, (N - 1) * dt, N, device=device)
-                u_func = make_u_func(u_norm, dt=dt, device=device)
+            total = 0.0
+            count = 0
+            for u_sub, y_sub in loader:
+                u_sub = u_sub.squeeze(0).to(device)
+                y_sub = y_sub.squeeze(0).to(device)
+                n = u_sub.shape[0]
+                t_sub = torch.linspace(0, (n - 1) * dt, n, device=device)
+
+                u_func = make_u_func(u_sub, dt=dt, device=device)
                 self.ode_func.set_u_func(u_func)
 
-                y0_state = torch.tensor(
-                    [y_norm[0], 0.0], dtype=torch.float32, device=device
-                )
-                y_target = torch.tensor(y_norm, dtype=torch.float32, device=device)
+                y0_state = torch.stack([y_sub[0], torch.zeros(1, device=device).squeeze()])
+                y_target = y_sub
 
                 optimizer.zero_grad()
-                ys = solver_fn(self.ode_func, y0_state, t_span)
+                ys = solver_fn(self.ode_func, y0_state, t_sub)
                 loss = nn.functional.mse_loss(ys[:, 0], y_target)
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.ode_func.parameters(), cfg.grad_clip)
                 optimizer.step()
-                return loss.item()
-            else:
-                total = 0.0
-                n_seqs = max(1, N // window)
-                for _ in range(n_seqs):
-                    start = np.random.randint(0, max(N - window, 1))
-                    end = min(start + window, N)
-                    u_sub = u_norm[start:end]
-                    y_sub = y_norm[start:end]
-                    n = len(u_sub)
-                    t_sub = torch.linspace(0, (n - 1) * dt, n, device=device)
-
-                    u_func = make_u_func(u_sub, dt=dt, device=device)
-                    self.ode_func.set_u_func(u_func)
-
-                    y0_state = torch.tensor(
-                        [y_sub[0], 0.0], dtype=torch.float32, device=device
-                    )
-                    y_target = torch.tensor(y_sub, dtype=torch.float32, device=device)
-
-                    optimizer.zero_grad()
-                    ys = solver_fn(self.ode_func, y0_state, t_sub)
-                    loss = nn.functional.mse_loss(ys[:, 0], y_target)
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(self.ode_func.parameters(), cfg.grad_clip)
-                    optimizer.step()
-                    total += loss.item()
-                return total / n_seqs
+                total += loss.item()
+                count += 1
+            return total / max(count, 1)
 
         # Build validation step (full val trajectory, no grad)
         val_sfn = None

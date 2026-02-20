@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from src.config import NeuralCDEConfig
+from src.data.torch_datasets import WindowedTrainDataset
 from src.models.base import BaseModel, PickleStateMixin
 from src.models.registry import register_model
 from src.models.training import (
@@ -120,24 +121,22 @@ class NeuralCDEModel(PickleStateMixin, BaseModel):
         window = cfg.train_window_size
         seqs = cfg.sequences_per_epoch
 
+        dataset = WindowedTrainDataset(
+            u_norm, y_norm, window, samples_per_epoch=seqs
+        )
+        loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
+
         def step_fn(epoch: int) -> float:
             self.cde_func.train()
             self.initial_net.train()
             self.output_net.train()
             total_loss = 0.0
+            count = 0
 
-            for _ in range(seqs):
-                max_start = max(N - window, 1)
-                start = np.random.randint(0, max_start)
-                end = min(start + window, N)
-
-                u_sub = torch.tensor(
-                    u_norm[start:end], dtype=torch.float32, device=device
-                )
-                y_sub = torch.tensor(
-                    y_norm[start:end], dtype=torch.float32, device=device
-                )
-                n_sub = len(u_sub)
+            for u_sub, y_sub in loader:
+                u_sub = u_sub.squeeze(0).to(device)
+                y_sub = y_sub.squeeze(0).to(device)
+                n_sub = u_sub.shape[0]
                 t_sub = torch.linspace(0, (n_sub - 1) * dt, n_sub, device=device)
 
                 X_path = self._make_path(u_sub, None, t_sub, device)
@@ -164,8 +163,9 @@ class NeuralCDEModel(PickleStateMixin, BaseModel):
                 nn.utils.clip_grad_norm_(all_params, cfg.grad_clip)
                 optimizer.step()
                 total_loss += loss.item()
+                count += 1
 
-            return total_loss / seqs
+            return total_loss / max(count, 1)
 
         # Build validation step (full val trajectory, no grad)
         val_sfn = None

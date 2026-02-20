@@ -50,18 +50,18 @@ def interp_u(
 
 
 def make_u_func(
-    u: np.ndarray,
-    t: np.ndarray | None = None,
+    u: "np.ndarray | torch.Tensor",
+    t: "np.ndarray | torch.Tensor | None" = None,
     dt: float = 0.05,
     device: str = "cpu",
 ):
-    """Build a callable ``u_func(t_eval) -> Tensor`` from numpy arrays.
+    """Build a callable ``u_func(t_eval) -> Tensor`` from data.
 
     Parameters
     ----------
-    u : np.ndarray
+    u : np.ndarray | Tensor
         Control signal (1-D).
-    t : np.ndarray | None
+    t : np.ndarray | Tensor | None
         Time vector.  Generated from *dt* when absent.
     dt : float
         Sampling interval (used if *t* is None).
@@ -72,15 +72,25 @@ def make_u_func(
     callable
         ``u_func(t_eval: Tensor) -> Tensor``
     """
-    u_arr = np.asarray(u, dtype=np.float32).ravel()
-    N = len(u_arr)
-    if t is None:
-        t_arr = np.arange(N, dtype=np.float32) * dt
+    if isinstance(u, torch.Tensor):
+        u_t = u.float().ravel().to(device)
     else:
-        t_arr = np.asarray(t, dtype=np.float32).ravel()
+        u_t = torch.tensor(
+            np.asarray(u, dtype=np.float32).ravel(),
+            dtype=torch.float32, device=device,
+        )
+    N = u_t.shape[0]
 
-    t_t = torch.tensor(t_arr, dtype=torch.float32, device=device)
-    u_t = torch.tensor(u_arr, dtype=torch.float32, device=device)
+    if t is not None:
+        if isinstance(t, torch.Tensor):
+            t_t = t.float().ravel().to(device)
+        else:
+            t_t = torch.tensor(
+                np.asarray(t, dtype=np.float32).ravel(),
+                dtype=torch.float32, device=device,
+            )
+    else:
+        t_t = torch.arange(N, dtype=torch.float32, device=device) * dt
 
     def _u_func(t_eval: torch.Tensor) -> torch.Tensor:
         return interp_u(t_eval, t_t, u_t)
