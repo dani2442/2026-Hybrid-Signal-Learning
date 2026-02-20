@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 from src.config import BlackboxCDE2DConfig
+from src.data.torch_datasets import WindowedTrainDataset
 from src.models.base import BaseModel, PickleStateMixin
 from src.models.blackbox.networks import (
     AdaptiveODEFunc,
@@ -100,36 +101,41 @@ class _BlackboxCDE2DBase(PickleStateMixin, BaseModel):
         N = len(u_norm)
         k = cfg.k_steps
         dt = cfg.dt
-        n_win = N - k
-        if n_win <= 0:
+
+        if N <= k:
             raise ValueError(f"Signal too short for k_steps={k}")
 
-        u_arr = np.asarray(u_norm, dtype=np.float32).ravel()
-        y_arr = np.asarray(y_norm, dtype=np.float32).ravel()
+        dataset = WindowedTrainDataset(
+            u_norm, y_norm, window_size=k + 1,
+            samples_per_epoch=max(N - k, cfg.batch_size),
+        )
+        loader = torch.utils.data.DataLoader(
+            dataset, batch_size=cfg.batch_size, shuffle=False, drop_last=True
+        )
 
         def step_fn(epoch: int) -> float:
             self.cde_func.train()
             self.output_net.train()
             total = 0.0
-            n_batches = max(1, n_win // cfg.batch_size)
+            count = 0
 
-            for _ in range(n_batches):
-                starts = np.random.randint(0, n_win, size=min(cfg.batch_size, n_win))
-                batch_loss = 0.0
+            for u_sub, y_sub in loader:
+                # u_sub: [B, k+1], y_sub: [B, k+1]
+                u_sub = u_sub.to(device)
+                y_sub = y_sub.to(device)
+                B = u_sub.shape[0]
 
-                for s in starts:
-                    u_sub = torch.tensor(
-                        u_arr[s: s + k], dtype=torch.float32, device=device
-                    )
-                    y_sub = torch.tensor(
-                        y_arr[s: s + k + 1], dtype=torch.float32, device=device
-                    )
-                    t_sub = torch.linspace(0, k * dt, k, device=device)
+                # Process each sample individually (CDE paths
+                # are not directly batchable from random windows).
+                batch_loss = torch.tensor(0.0, device=device)
+                for i in range(B):
+                    u_i = u_sub[i, :k]  # [k]
+                    t_sub_i = torch.linspace(0, k * dt, k, device=device)
+                    X_path = self._make_path(u_i, t_sub_i, device)
 
-                    X_path = self._make_path(u_sub, t_sub, device)
-                    z0 = torch.tensor(
-                        [[y_arr[s], 0.0]], dtype=torch.float32, device=device
-                    )
+                    z0 = torch.stack(
+                        [y_sub[i, 0:1], torch.zeros(1, device=device)], dim=-1
+                    )  # [1, 2]
                     t_eval = torch.linspace(0, k * dt, k + 1, device=device)
 
                     z_pred = torchcde.cdeint(
@@ -137,17 +143,17 @@ class _BlackboxCDE2DBase(PickleStateMixin, BaseModel):
                         t=t_eval, method="rk4",
                     )
                     y_pred = self.output_net(z_pred.squeeze(0)).squeeze(-1)
-                    loss = nn.functional.mse_loss(y_pred, y_sub)
-                    batch_loss += loss
+                    batch_loss = batch_loss + nn.functional.mse_loss(y_pred, y_sub[i])
 
                 optimizer.zero_grad()
-                avg_loss = batch_loss / len(starts)
+                avg_loss = batch_loss / B
                 avg_loss.backward()
                 nn.utils.clip_grad_norm_(all_params, cfg.grad_clip)
                 optimizer.step()
                 total += avg_loss.item()
+                count += 1
 
-            return total / n_batches
+            return total / max(count, 1)
 
         # Build validation step (full val trajectory, no grad)
         val_sfn = None

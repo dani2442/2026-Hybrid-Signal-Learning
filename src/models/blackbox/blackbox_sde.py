@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 from src.config import BlackboxSDE2DConfig
+from src.data.torch_datasets import WindowedTrainDataset
 from src.models.base import BaseModel, PickleStateMixin
 from src.models.blackbox.networks import (
     AdaptiveODEFunc,
@@ -99,29 +100,15 @@ class _BlackboxSDE2DBase(PickleStateMixin, BaseModel):
         k = cfg.k_steps
         dt = cfg.dt
 
-        n_win = N - k
-        if n_win <= 0:
+        if N <= k:
             raise ValueError(f"Signal length ({N}) too short for k_steps={k}")
 
-        u_arr = np.asarray(u_norm, dtype=np.float32).ravel()
-        y_arr = np.asarray(y_norm, dtype=np.float32).ravel()
-
-        y0_all = torch.tensor(
-            np.column_stack([y_arr[:n_win], np.zeros(n_win)]),
-            dtype=torch.float32, device=device,
+        dataset = WindowedTrainDataset(
+            u_norm, y_norm, window_size=k + 1,
+            samples_per_epoch=max(N - k, cfg.batch_size),
         )
-        y_target_all = torch.tensor(
-            np.lib.stride_tricks.sliding_window_view(y_arr, k + 1)[:n_win],
-            dtype=torch.float32, device=device,
-        )
-        u_windows = torch.tensor(
-            np.lib.stride_tricks.sliding_window_view(u_arr, k)[:n_win],
-            dtype=torch.float32, device=device,
-        ).unsqueeze(-1)  # [n_win, k, 1]
-
-        dataset = torch.utils.data.TensorDataset(y0_all, y_target_all, u_windows)
         loader = torch.utils.data.DataLoader(
-            dataset, batch_size=cfg.batch_size, shuffle=True, drop_last=True
+            dataset, batch_size=cfg.batch_size, shuffle=False, drop_last=True
         )
 
         def step_fn(epoch: int) -> float:
@@ -129,9 +116,20 @@ class _BlackboxSDE2DBase(PickleStateMixin, BaseModel):
             diff.train()
             total = 0.0
             count = 0
-            for y0_b, yt_b, u_b in loader:
-                # u_b: [B, k, 1] — per-sample u windows aligned with y0_b
-                def _batch_u_func(t, _u_b=u_b, _dt=dt, _k=k):
+            for u_sub, y_sub in loader:
+                # u_sub: [B, k+1], y_sub: [B, k+1]
+                u_sub = u_sub.to(device)
+                y_sub = y_sub.to(device)
+                B = u_sub.shape[0]
+
+                y0 = torch.stack(
+                    [y_sub[:, 0], torch.zeros(B, device=device)], dim=-1
+                )  # [B, 2]
+
+                # Build batched u_func for torchsde
+                u_batch = u_sub[:, :k].unsqueeze(-1)  # [B, k, 1]
+
+                def _batch_u_func(t, _u_b=u_batch, _dt=dt, _k=k):
                     t_val = t.item() if isinstance(t, torch.Tensor) else float(t)
                     idx = min(max(int(t_val / _dt), 0), _k - 1)
                     return _u_b[:, idx, :]  # [B, 1]
@@ -142,11 +140,11 @@ class _BlackboxSDE2DBase(PickleStateMixin, BaseModel):
 
                 optimizer.zero_grad()
                 y_pred = torchsde.sdeint(
-                    self.sde_wrapper, y0_b, t_span, method="euler", dt=dt
+                    self.sde_wrapper, y0, t_span, method="euler", dt=dt
                 )
                 # y_pred: [k+1, B, state_dim]
                 loss = nn.functional.mse_loss(
-                    y_pred[:, :, 0].T, yt_b
+                    y_pred[:, :, 0].T, y_sub
                 )
                 loss.backward()
                 nn.utils.clip_grad_norm_(all_params, cfg.grad_clip)

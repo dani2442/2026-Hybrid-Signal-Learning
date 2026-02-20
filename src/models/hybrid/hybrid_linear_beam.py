@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.config import HybridLinearBeamConfig
+from src.data.torch_datasets import WindowedTrainDataset
 from src.models.base import BaseModel, PickleStateMixin
 from src.models.continuous.interpolation import make_u_func
 from src.models.registry import register_model
@@ -145,27 +146,36 @@ class HybridLinearBeamModel(PickleStateMixin, BaseModel):
         )
         stopper = EarlyStopper(cfg.early_stopping_patience)
 
-        N = len(u_norm)
         dt = cfg.dt
-        t_span = torch.linspace(0, (N - 1) * dt, N, device=device)
-        u_func = make_u_func(u_norm, dt=dt, device=device)
-        y_target = torch.tensor(y_norm, dtype=torch.float32, device=device)
+        window = cfg.train_window_size
 
-        y0_state = torch.tensor(
-            [y_norm[0], 0.0], dtype=torch.float32, device=device
-        )
+        dataset = WindowedTrainDataset(u_norm, y_norm, window)
+        loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
 
         def step_fn(epoch: int) -> float:
             self.nn_correction.train()
-            optimizer.zero_grad()
-            ys = self._integrate(
-                y0_state, u_func, t_span, cfg.integration_substeps
-            )
-            loss = nn.functional.mse_loss(ys[:, 0], y_target)
-            loss.backward()
-            nn.utils.clip_grad_norm_(all_params, cfg.grad_clip)
-            optimizer.step()
-            return loss.item()
+            total = 0.0
+            count = 0
+            for u_sub, y_sub in loader:
+                u_sub = u_sub.squeeze(0).to(device)
+                y_sub = y_sub.squeeze(0).to(device)
+                n = u_sub.shape[0]
+                t_sub = torch.linspace(0, (n - 1) * dt, n, device=device)
+
+                u_func = make_u_func(u_sub, dt=dt, device=device)
+                y0_state = torch.stack([y_sub[0], torch.zeros(1, device=device).squeeze()])
+
+                optimizer.zero_grad()
+                ys = self._integrate(
+                    y0_state, u_func, t_sub, cfg.integration_substeps
+                )
+                loss = nn.functional.mse_loss(ys[:, 0], y_sub)
+                loss.backward()
+                nn.utils.clip_grad_norm_(all_params, cfg.grad_clip)
+                optimizer.step()
+                total += loss.item()
+                count += 1
+            return total / max(count, 1)
 
         # Build validation step (full val trajectory, no grad)
         val_sfn = None

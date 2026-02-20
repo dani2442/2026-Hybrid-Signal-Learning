@@ -11,13 +11,13 @@ import torch
 import torch.nn as nn
 
 from src.config import BlackboxODE2DConfig
+from src.data.torch_datasets import WindowedTrainDataset
 from src.models.base import BaseModel, PickleStateMixin
 from src.models.blackbox.networks import (
     AdaptiveODEFunc,
     StructuredODEFunc,
     VanillaODEFunc,
 )
-from src.models.continuous.interpolation import interp_u
 from src.models.registry import register_model
 from src.models.training import (
     EarlyStopper,
@@ -73,52 +73,44 @@ class _BlackboxODE2DBase(PickleStateMixin, BaseModel):
         k = cfg.k_steps
         dt = cfg.dt
 
-        # Build windows for k-step shooting
-        n_win = N - k
-        if n_win <= 0:
+        if N <= k:
             raise ValueError(f"Signal length ({N}) too short for k_steps={k}")
 
-        u_arr = np.asarray(u_norm, dtype=np.float32).ravel()
-        y_arr = np.asarray(y_norm, dtype=np.float32).ravel()
-
-        # y0[i] → target y[i:i+k+1]
-        y0_all = torch.tensor(
-            np.column_stack([y_arr[:n_win], np.zeros(n_win)]),
-            dtype=torch.float32, device=device,
+        dataset = WindowedTrainDataset(
+            u_norm, y_norm, window_size=k + 1,
+            samples_per_epoch=max(N - k, cfg.batch_size),
         )
-        y_target_all = torch.tensor(
-            np.lib.stride_tricks.sliding_window_view(y_arr, k + 1)[:n_win],
-            dtype=torch.float32, device=device,
-        )
-        u_windows = torch.tensor(
-            np.lib.stride_tricks.sliding_window_view(u_arr, k)[:n_win],
-            dtype=torch.float32, device=device,
-        ).unsqueeze(-1)
-
-        dataset = torch.utils.data.TensorDataset(y0_all, y_target_all, u_windows)
         loader = torch.utils.data.DataLoader(
-            dataset, batch_size=cfg.batch_size, shuffle=True, drop_last=True
+            dataset, batch_size=cfg.batch_size, shuffle=False, drop_last=True
         )
 
         def step_fn(epoch: int) -> float:
             self.ode_func.train()
             total = 0.0
             count = 0
-            for y0_b, yt_b, u_b in loader:
-                # y0_b: [B, 2], yt_b: [B, k+1], u_b: [B, k, 1]
+            for u_sub, y_sub in loader:
+                # u_sub: [B, k+1], y_sub: [B, k+1]
+                u_sub = u_sub.to(device)
+                y_sub = y_sub.to(device)
+                B = u_sub.shape[0]
+
+                y0 = torch.stack(
+                    [y_sub[:, 0], torch.zeros(B, device=device)], dim=-1
+                )  # [B, 2]
+
                 optimizer.zero_grad()
 
                 # Euler k-step integration
-                y_pred = [y0_b]
-                state = y0_b
+                y_pred = [y0]
+                state = y0
                 for step in range(k):
-                    u_step = u_b[:, step, :]
+                    u_step = u_sub[:, step:step + 1]  # [B, 1]
                     dydt = self.ode_func(state, u_step)
                     state = state + dt * dydt
                     y_pred.append(state)
                 y_pred = torch.stack(y_pred, dim=1)  # [B, k+1, 2]
 
-                loss = nn.functional.mse_loss(y_pred[:, :, 0], yt_b)
+                loss = nn.functional.mse_loss(y_pred[:, :, 0], y_sub)
                 loss.backward()
                 nn.utils.clip_grad_norm_(
                     self.ode_func.parameters(), cfg.grad_clip

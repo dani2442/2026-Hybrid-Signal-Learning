@@ -233,6 +233,7 @@ class HybridLinearBeamConfig(BaseConfig):
     epochs: int = 600
     learning_rate: float = 1e-2
     integration_substeps: int = 1
+    train_window_size: int = 50
 
 
 @dataclass
@@ -241,6 +242,7 @@ class HybridNonlinearCamConfig(BaseConfig):
     epochs: int = 600
     learning_rate: float = 2e-2
     integration_substeps: int = 20
+    train_window_size: int = 50
     R: float = 0.015
     r: float = 0.005
     e: float = 0.005

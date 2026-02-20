@@ -16,6 +16,7 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from src.config import BaseConfig
+from src.data.torch_datasets import WindowedTrainDataset
 from src.models.constants import DEFAULT_GRAD_CLIP
 
 
@@ -312,44 +313,6 @@ def train_supervised_torch_model(
 # Sequence training (GRU / LSTM / TCN / Mamba)
 # ─────────────────────────────────────────────────────────────────────
 
-def create_sequence_dataset(
-    u: np.ndarray,
-    y: np.ndarray,
-    window_size: int,
-) -> torch.utils.data.TensorDataset:
-    """Create sliding-window ``TensorDataset`` for sequence models.
-
-    Parameters
-    ----------
-    u, y : np.ndarray
-        1-D signals.
-    window_size : int
-        Sub-sequence length.
-
-    Returns
-    -------
-    TensorDataset
-        Pairs of ``(u_window, y_window)`` with shape ``(window, 1)``.
-    """
-    u = np.asarray(u, dtype=np.float32).ravel()
-    y = np.asarray(y, dtype=np.float32).ravel()
-    n = len(u)
-
-    if n < window_size:
-        # If signal is shorter than window, use full signal as one sample
-        u_t = torch.tensor(u, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
-        y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
-        return torch.utils.data.TensorDataset(u_t, y_t)
-
-    n_windows = n - window_size + 1
-    u_windows = np.lib.stride_tricks.sliding_window_view(u, window_size)
-    y_windows = np.lib.stride_tricks.sliding_window_view(y, window_size)
-
-    u_t = torch.tensor(u_windows[:n_windows], dtype=torch.float32).unsqueeze(-1)
-    y_t = torch.tensor(y_windows[:n_windows], dtype=torch.float32).unsqueeze(-1)
-    return torch.utils.data.TensorDataset(u_t, y_t)
-
-
 def train_sequence_model(
     model: nn.Module,
     u_train: np.ndarray,
@@ -382,9 +345,9 @@ def train_sequence_model(
         Per-epoch training losses.
     """
     window_size = getattr(config, "train_window_size", 20)
-    dataset = create_sequence_dataset(u_train, y_train, window_size)
+    dataset = WindowedTrainDataset(u_train, y_train, window_size)
     loader = torch.utils.data.DataLoader(
-        dataset, batch_size=config.batch_size, shuffle=True, drop_last=True
+        dataset, batch_size=config.batch_size, shuffle=False
     )
 
     model.to(device)
@@ -433,8 +396,9 @@ def train_sequence_model(
         total_loss = 0.0
         count = 0
         for u_batch, y_batch in loader:
-            u_batch = u_batch.to(device)
-            y_batch = y_batch.to(device)
+            # WindowedTrainDataset yields [B, window]; sequence nets need [B, window, 1]
+            u_batch = u_batch.unsqueeze(-1).to(device)
+            y_batch = y_batch.unsqueeze(-1).to(device)
             optimizer.zero_grad()
             pred = model(u_batch)
             loss = criterion(pred, y_batch)
@@ -460,138 +424,3 @@ def train_sequence_model(
         model_params=list(model.parameters()),
     )
 
-
-# ─────────────────────────────────────────────────────────────────────
-# Continuous-time subsequence training (NeuralODE / SDE / UDE / Physics)
-# ─────────────────────────────────────────────────────────────────────
-
-def train_sequence_batches(
-    step_fn: Callable,
-    *,
-    u: np.ndarray,
-    y: np.ndarray,
-    config: BaseConfig,
-    t: np.ndarray | None = None,
-    optimizer: torch.optim.Optimizer,
-    logger=None,
-    device: str = "cpu",
-    val_step_fn: Optional[Callable[[], float]] = None,
-    model_params=None,
-) -> List[float]:
-    """Epoch loop for continuous-time models with subsequence batching.
-
-    ``step_fn(u_sub, y_sub, t_sub)`` is called with random subsequences
-    and must return the scalar loss (already backpropagated).
-
-    Parameters
-    ----------
-    step_fn : callable(u_sub, y_sub, t_sub) -> float
-        One-subsequence forward/backward pass.
-    u, y : np.ndarray
-        Full training signals.
-    config : BaseConfig
-    t : np.ndarray | None
-        Time vector; generated from ``config.dt`` if absent.
-    optimizer : Optimizer
-    logger : WandbLogger | None
-    device : str
-    val_step_fn : callable() -> float | None
-        If provided, called every ``log_every`` epochs to compute validation
-        loss, logged as ``val_loss``.
-    model_params : iterable | None
-        If provided, gradient norm is computed and logged as ``grad_norm``.
-
-    Returns
-    -------
-    list[float]
-        Per-epoch losses.
-    """
-    dt = getattr(config, "dt", 0.05)
-    window = getattr(config, "train_window_size", 50)
-    seqs_per_epoch = getattr(config, "sequences_per_epoch", 24)
-    grad_clip = getattr(config, "grad_clip", DEFAULT_GRAD_CLIP)
-
-    N = len(u)
-    if t is None:
-        t = np.arange(N) * dt
-
-    scheduler = make_scheduler(
-        optimizer,
-        patience=config.scheduler_patience,
-        factor=config.scheduler_factor,
-        min_lr=config.scheduler_min_lr,
-    )
-    stopper = EarlyStopper(config.early_stopping_patience)
-
-    def epoch_step(_epoch: int) -> float:
-        total = 0.0
-        for _ in range(seqs_per_epoch):
-            max_start = max(N - window, 1)
-            start = np.random.randint(0, max_start)
-            end = min(start + window, N)
-            u_sub = u[start:end]
-            y_sub = y[start:end]
-            t_sub = t[start:end] - t[start]
-
-            optimizer.zero_grad()
-            loss_val = step_fn(u_sub, y_sub, t_sub)
-            nn.utils.clip_grad_norm_(
-                [p for g in optimizer.param_groups for p in g["params"]],
-                grad_clip,
-            )
-            optimizer.step()
-            total += loss_val
-        return total / seqs_per_epoch
-
-    return train_loop(
-        epoch_step,
-        epochs=config.epochs,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        early_stopper=stopper,
-        logger=logger,
-        log_every=getattr(config, "wandb_log_every", 1),
-        verbose=config.verbose,
-        desc="Training (continuous)",
-        val_step_fn=val_step_fn,
-        model_params=model_params,
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────
-# K-step shooting (blackbox ODE/SDE/CDE)
-# ─────────────────────────────────────────────────────────────────────
-
-def prepare_shooting_windows(
-    u: np.ndarray,
-    y: np.ndarray,
-    k_steps: int,
-    dt: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Slice ``(u, y)`` into k-step windows for shooting training.
-
-    Returns
-    -------
-    u_windows : Tensor [n_windows, k_steps, 1]
-    y_windows : Tensor [n_windows, k_steps, state_dim]
-    t_span : Tensor [k_steps]
-    """
-    N = len(u)
-    n_windows = N - k_steps
-    if n_windows <= 0:
-        raise ValueError(
-            f"Signal length ({N}) must exceed k_steps ({k_steps})"
-        )
-
-    u_arr = np.asarray(u, dtype=np.float32).ravel()
-    y_arr = np.asarray(y, dtype=np.float32).ravel()
-
-    u_wins = np.lib.stride_tricks.sliding_window_view(u_arr, k_steps)[:n_windows]
-    y_wins = np.lib.stride_tricks.sliding_window_view(y_arr, k_steps + 1)[:n_windows]
-
-    # y_windows includes the initial condition at [:, 0] and targets at [:, 1:]
-    u_t = torch.tensor(u_wins, dtype=torch.float32).unsqueeze(-1)
-    y_t = torch.tensor(y_wins, dtype=torch.float32).unsqueeze(-1)
-    t_span = torch.linspace(0, k_steps * dt, k_steps + 1)
-
-    return u_t, y_t, t_span

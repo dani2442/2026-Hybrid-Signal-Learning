@@ -130,7 +130,7 @@ def main() -> None:
     parser.add_argument(
         "--metric",
         type=str,
-        default="MSE",
+        default="R2",
         choices=["MSE", "R2", "FIT"],
         help="Validation metric to optimise (default: MSE).",
     )
