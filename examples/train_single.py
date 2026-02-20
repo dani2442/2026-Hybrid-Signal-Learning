@@ -14,10 +14,12 @@ import argparse
 import os
 import sys
 import time
+from datetime import datetime
 
 # Ensure project root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import numpy as np
 from src.data import from_bab_experiments, list_bab_experiments
 from src.models import build_model, list_models
 from src.utils.runtime import seed_all
@@ -104,7 +106,11 @@ def main() -> None:
     })
 
     logger = (
-        WandbLogger(args.wandb_project, run_name=args.model, config=wandb_config)
+        WandbLogger(
+            args.wandb_project,
+            run_name=f"{args.model}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            config=wandb_config,
+        )
         if args.wandb_project else None
     )
 
@@ -123,13 +129,33 @@ def main() -> None:
     skip = getattr(model, "max_lag", 0)
     final_log: dict = {}
 
+    # -- Validation: per-dataset + aggregated --
+    val_y_true_all: list[np.ndarray] = []
+    val_y_pred_all: list[np.ndarray] = []
     for val_ds in val_sets:
         y_val_fr = model.predict(val_ds.u, val_ds.y, mode="FR")
         val_fr_metrics = compute_all(val_ds.y, y_val_fr, skip=skip)
         if logger:
             prefixed = {f"val/{val_ds.name}/{k}": v for k, v in val_fr_metrics.items()}
             final_log.update(prefixed)
+        yt, yp = np.asarray(val_ds.y).ravel(), np.asarray(y_val_fr).ravel()
+        n = min(len(yt), len(yp))
+        s = min(skip, n)
+        val_y_true_all.append(yt[s:n])
+        val_y_pred_all.append(yp[s:n])
 
+    if val_y_true_all:
+        agg_val = compute_all(
+            np.concatenate(val_y_true_all),
+            np.concatenate(val_y_pred_all),
+            skip=0,
+        )
+        if logger:
+            final_log.update({f"val/aggregated/{k}": v for k, v in agg_val.items()})
+
+    # -- Test: per-dataset + aggregated --
+    test_y_true_all: list[np.ndarray] = []
+    test_y_pred_all: list[np.ndarray] = []
     for test_ds in test_sets:
         y_pred = model.predict(test_ds.u, test_ds.y, mode="FR")
         print(summary(test_ds.y, y_pred, f"{args.model}::{test_ds.name}", skip=skip))
@@ -137,6 +163,26 @@ def main() -> None:
         if logger:
             prefixed = {f"test/{test_ds.name}/{k}": v for k, v in test_metrics.items()}
             final_log.update(prefixed)
+        yt, yp = np.asarray(test_ds.y).ravel(), np.asarray(y_pred).ravel()
+        n = min(len(yt), len(yp))
+        s = min(skip, n)
+        test_y_true_all.append(yt[s:n])
+        test_y_pred_all.append(yp[s:n])
+
+    if test_y_true_all:
+        agg_test = compute_all(
+            np.concatenate(test_y_true_all),
+            np.concatenate(test_y_pred_all),
+            skip=0,
+        )
+        print(f"\n{'=' * 40}")
+        print(f"Aggregated test metrics ({len(test_sets)} datasets)")
+        print(f"{'=' * 40}")
+        for k, v in agg_test.items():
+            print(f"  {k}: {v:.6f}")
+        print(f"{'=' * 40}")
+        if logger:
+            final_log.update({f"test/aggregated/{k}": v for k, v in agg_test.items()})
 
     if logger and final_log:
         final_log["train_time"] = train_time
@@ -144,10 +190,11 @@ def main() -> None:
         logger.log_metrics(final_log)
         logger.log_summary(final_log)
 
-    # Save
+    # Save with timestamp to avoid overwriting previous runs
     os.makedirs(args.save_dir, exist_ok=True)
     dataset_tag = "__".join(dataset_names)
-    save_path = os.path.join(args.save_dir, f"{args.model}_{dataset_tag}.pkl")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = os.path.join(args.save_dir, f"{args.model}_{dataset_tag}_{timestamp}.pkl")
     model.save(save_path)
     print(f"Model saved to {save_path}")
 

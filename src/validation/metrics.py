@@ -79,7 +79,9 @@ def fit_index(y_true: np.ndarray, y_pred: np.ndarray, skip: int = 0) -> float:
 
 
 def compute_all(y_true: np.ndarray, y_pred: np.ndarray, skip: int = 0) -> Dict[str, float]:
-    """Compute all metrics and return as a dict.
+    """Compute core metrics and return as a dict.
+
+    Only MSE, R² and FIT are reported.
 
     Parameters
     ----------
@@ -91,10 +93,7 @@ def compute_all(y_true: np.ndarray, y_pred: np.ndarray, skip: int = 0) -> Dict[s
     """
     return {
         "MSE": mse(y_true, y_pred, skip),
-        "RMSE": rmse(y_true, y_pred, skip),
-        "MAE": mae(y_true, y_pred, skip),
         "R2": r2(y_true, y_pred, skip),
-        "NRMSE": nrmse(y_true, y_pred, skip),
         "FIT": fit_index(y_true, y_pred, skip),
     }
 
@@ -107,10 +106,7 @@ def summary(y_true: np.ndarray, y_pred: np.ndarray, name: str = "Model", skip: i
         f"Metrics for: {name}\n"
         f"{'=' * 40}\n"
         f"  MSE:    {m['MSE']:.6f}\n"
-        f"  RMSE:   {m['RMSE']:.6f}\n"
-        f"  MAE:    {m['MAE']:.6f}\n"
         f"  R²:     {m['R2']:.4f}\n"
-        f"  NRMSE:  {m['NRMSE']:.4f}\n"
         f"  FIT:    {m['FIT']:.4f}\n"
         f"{'=' * 40}"
     )

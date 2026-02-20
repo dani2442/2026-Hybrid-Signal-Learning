@@ -149,9 +149,9 @@ def train_loop(
         loss logged as ``val_loss``.
     val_metrics_fn : callable() -> dict | None
         If provided, called every ``log_every`` epochs to compute a full
-        set of validation metrics (R2, RMSE, MAE, FIT …).  The returned
+        set of validation metrics (R2, FIT …).  The returned
         dict is merged directly into the per-epoch log, so use prefixed
-        keys such as ``val/R2``, ``val/RMSE``, etc.
+        keys such as ``val/R2``, ``val/FIT``, etc.
     model_params : iterable | None
         If provided, gradient norm is computed and logged as ``grad_norm``.
 

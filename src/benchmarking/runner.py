@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -237,7 +238,7 @@ def run_all_benchmarks(
         if result["metrics"] and verbose:
             m = result["metrics"]
             print(
-                f"  RMSE={m['RMSE']:.6f}  FIT={m['FIT']:.4f}  "
+                f"  MSE={m['MSE']:.6f}  FIT={m['FIT']:.4f}  "
                 f"R2={m['R2']:.4f}  t={result['train_time']:.1f}s"
             )
         elif verbose:
@@ -246,7 +247,8 @@ def run_all_benchmarks(
         if save_dir and result["model"] is not None:
             os.makedirs(save_dir, exist_ok=True)
             try:
-                result["model"].save(os.path.join(save_dir, f"{name}.pkl"))
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                result["model"].save(os.path.join(save_dir, f"{name}_{timestamp}.pkl"))
             except Exception as save_err:
                 if verbose:
                     print(f"  WARNING: could not save {name}: {save_err}")

@@ -115,8 +115,8 @@ def run_one(model_key: str, train_ds, val_ds, test_ds) -> dict:
         "epochs": config.epochs,
         "val_osa_r2": round(val_osa_metrics["R2"], 4),
         "val_fr_r2":  round(val_fr_metrics["R2"], 4),
-        "osa_rmse": round(osa_metrics["RMSE"], 6),
-        "fr_rmse":  round(fr_metrics["RMSE"], 6),
+        "osa_mse":  round(osa_metrics["MSE"], 6),
+        "fr_mse":   round(fr_metrics["MSE"], 6),
         "osa_r2":   round(osa_metrics["R2"], 4),
         "fr_r2":    round(fr_metrics["R2"], 4),
         "skip":     skip,
@@ -159,7 +159,7 @@ def main():
     hdr = (
         f"{'Model':<25} {'Ep':>4} {'Time':>7} {'Skip':>4} "
         f"{'Val OSA R²':>10} {'Val FR R²':>10} "
-        f"{'OSA RMSE':>12} {'FR RMSE':>12} "
+        f"{'OSA MSE':>12} {'FR MSE':>12} "
         f"{'OSA R²':>9} {'FR R²':>9}  Status"
     )
     print(f"\n{hdr}")
@@ -172,7 +172,7 @@ def main():
             r = {
                 "model": key, "time_s": 0, "epochs": "-",
                 "val_osa_r2": "-", "val_fr_r2": "-",
-                "osa_rmse": "-", "fr_rmse": "-",
+                "osa_mse": "-", "fr_mse": "-",
                 "osa_r2": "-", "fr_r2": "-",
                 "skip": "-",
                 "status": f"FAIL: {exc}",
@@ -184,7 +184,7 @@ def main():
             f"{r['model']:<25} {str(r['epochs']):>4} "
             f"{str(r['time_s']):>6}s {str(r['skip']):>4} "
             f"{str(r['val_osa_r2']):>10} {str(r['val_fr_r2']):>10} "
-            f"{str(r['osa_rmse']):>12} {str(r['fr_rmse']):>12} "
+            f"{str(r['osa_mse']):>12} {str(r['fr_mse']):>12} "
             f"{str(r['osa_r2']):>9} {str(r['fr_r2']):>9}  "
             f"{r['status']}"
         )

@@ -21,7 +21,7 @@ def test_run_single_benchmark_narx():
     )
     assert result["model_name"] == "narx"
     assert result["metrics"] is not None
-    assert "RMSE" in result["metrics"]
+    assert "MSE" in result["metrics"]
 
 
 def test_run_single_benchmark_bad_model():

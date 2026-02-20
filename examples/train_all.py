@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import datetime
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -134,7 +135,8 @@ def main() -> None:
             _ds_info = {"dataset_names": [ds.name], "n_datasets": 1}
 
         def logger_factory(model_name: str):
-            run_name = f"{args.wandb_run_prefix}_{model_name}_{dataset_tag}"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_name = f"{args.wandb_run_prefix}_{model_name}_{dataset_tag}_{timestamp}"
             return WandbLogger(
                 args.wandb_project,
                 run_name=run_name,
@@ -167,8 +169,9 @@ def main() -> None:
     for r in results:
         name = r["model_name"]
         if r["metrics"]:
-            print(f"  {name:30s}  RMSE={r['metrics']['RMSE']:.6f}  "
+            print(f"  {name:30s}  MSE={r['metrics']['MSE']:.6f}  "
                   f"FIT={r['metrics']['FIT']:.4f}  "
+                  f"R2={r['metrics']['R2']:.4f}  "
                   f"t={r['train_time']:.1f}s")
         else:
             print(f"  {name:30s}  ERROR: {r.get('error', 'unknown')}")
