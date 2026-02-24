@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from .bab_data import ExperimentData
+from .data import ExperimentData
 
 
 def timestamp_tag() -> str:
