@@ -196,6 +196,9 @@ def _simulate_sde_rollout(
     device: torch.device,
 ) -> np.ndarray:
     """SDE rollout via torchsde.sdeint."""
+    model.eval()
+    model.to(device)
+
     t_t = torch.tensor(t, dtype=torch.float32, device=device)
     u_t = torch.tensor(u, dtype=torch.float32, device=device).reshape(-1, 1)
     x0 = torch.tensor(y0, dtype=torch.float32, device=device).reshape(1, -1)

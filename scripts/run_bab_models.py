@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated NN variants for blackbox/hybrid models",
     )
 
-    parser.add_argument("--n-runs", type=int, default=10, help="Independent training runs per model specification")
+    parser.add_argument("--n-runs", type=int, default=5, help="Independent training runs per model specification")
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--batch-size", type=int, default=128)
@@ -125,6 +125,8 @@ def main() -> None:
 
     device = select_device(args.device)
     print(f"Using device: {device}")
+    if device.type == "cuda":
+        print(f"  CUDA device: {torch.cuda.get_device_name(device)}")
     print("Protocol: fixed protocol-2 (temporal 50/50 for core datasets)")
     if args.progress and tqdm is None:
         print("Progress bars requested but tqdm is not installed; falling back to plain logs.")
@@ -281,7 +283,7 @@ def main() -> None:
         linear_ref_model = None
         stribeck_ref_model = None
         if ("linear" in model_keys) or ("hybrid_frozen" in model_keys):
-            linear_ref_model = build_model("linear")
+            linear_ref_model = build_model("linear").to(device)
             train_and_evaluate(
                 model=linear_ref_model,
                 model_key="linear",
@@ -291,7 +293,7 @@ def main() -> None:
             )
 
         if ("stribeck" in model_keys) or ("hybrid_frozen_stribeck" in model_keys):
-            stribeck_ref_model = build_model("stribeck")
+            stribeck_ref_model = build_model("stribeck").to(device)
             train_and_evaluate(
                 model=stribeck_ref_model,
                 model_key="stribeck",
@@ -308,16 +310,16 @@ def main() -> None:
                 if linear_ref_model is None:
                     raise RuntimeError("Hybrid frozen requested but no linear reference model available")
                 frozen = extract_linear_params(linear_ref_model)
-                model = build_model("hybrid_frozen", nn_variant=nn_variant, frozen_phys_params=frozen)
+                model = build_model("hybrid_frozen", nn_variant=nn_variant, frozen_phys_params=frozen).to(device)
                 extra = {"frozen_from": f"linear__physics__run{run_idx:02d}", "frozen_phys": copy.deepcopy(frozen)}
             elif model_key == "hybrid_frozen_stribeck":
                 if stribeck_ref_model is None:
                     raise RuntimeError("Hybrid frozen stribeck requested but no stribeck reference model available")
                 frozen = extract_stribeck_params(stribeck_ref_model)
-                model = build_model("hybrid_frozen_stribeck", nn_variant=nn_variant, frozen_phys_params=frozen)
+                model = build_model("hybrid_frozen_stribeck", nn_variant=nn_variant, frozen_phys_params=frozen).to(device)
                 extra = {"frozen_from": f"stribeck__physics__run{run_idx:02d}", "frozen_phys": copy.deepcopy(frozen)}
             else:
-                model = build_model(model_key, nn_variant=nn_variant)
+                model = build_model(model_key, nn_variant=nn_variant).to(device)
                 extra = None
 
             train_and_evaluate(
