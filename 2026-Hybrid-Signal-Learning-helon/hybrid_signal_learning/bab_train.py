@@ -81,6 +81,8 @@ def train_model(
 
         start_idx = np.random.choice(valid_start_indices, size=cfg.batch_size, replace=True)
         x0 = tensors.y[start_idx]
+        if getattr(model, "augmented_state", False):
+            x0 = model.prepare_x0(x0)
         model.set_batch_start_times(tensors.t[start_idx].reshape(-1, 1))
 
         pred_state = odeint(model, x0, t_eval, method="rk4")
@@ -127,6 +129,8 @@ def simulate_full_rollout(
     t_t = torch.tensor(t, dtype=torch.float32, device=device)
     u_t = torch.tensor(u, dtype=torch.float32, device=device).reshape(-1, 1)
     x0 = torch.tensor(y0, dtype=torch.float32, device=device).reshape(1, -1)
+    if getattr(model, "augmented_state", False):
+        x0 = model.prepare_x0(x0)
 
     model.set_series(t_t, u_t)
     model.set_batch_start_times(torch.zeros(1, 1, device=device))
@@ -135,7 +139,8 @@ def simulate_full_rollout(
         pred = odeint(model, x0, t_t, method="rk4").squeeze(1).detach().cpu().numpy()
 
     model.set_batch_start_times(None)
-    return pred
+    obs_dim = len(y0) if y0.ndim == 1 else y0.shape[-1]
+    return pred[:, :obs_dim]
 
 
 def compute_split_metrics(y_true: np.ndarray, y_hat: np.ndarray) -> dict[str, float]:
