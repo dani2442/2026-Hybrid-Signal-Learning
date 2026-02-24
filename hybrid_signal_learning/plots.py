@@ -18,6 +18,14 @@ DEFAULT_COLORS = {
     "hybrid_joint_stribeck": "tab:brown",
     "hybrid_frozen": "darkviolet",
     "hybrid_frozen_stribeck": "tab:pink",
+    # --- new integrated models ---
+    "ude": "teal",
+    "neural_sde": "coral",
+    "gru": "goldenrod",
+    "lstm": "mediumseagreen",
+    "tcn": "crimson",
+    "mamba": "slateblue",
+    "feedforward_nn": "sienna",
 }
 
 DEFAULT_STYLES = {
@@ -31,6 +39,14 @@ DEFAULT_STYLES = {
     "hybrid_joint_stribeck": (0, (1, 1)),
     "hybrid_frozen": (0, (3, 1, 1, 1)),
     "hybrid_frozen_stribeck": (0, (5, 2, 1, 2)),
+    # --- new integrated models ---
+    "ude": "-",
+    "neural_sde": "--",
+    "gru": ":",
+    "lstm": (0, (5, 1)),
+    "tcn": (0, (3, 1, 1, 1)),
+    "mamba": (0, (1, 1)),
+    "feedforward_nn": (0, (4, 1, 1, 1, 1, 1)),
 }
 
 
@@ -46,6 +62,14 @@ def model_display_name(model_key: str) -> str:
         "hybrid_joint_stribeck": "Hybrid-Joint-Stribeck",
         "hybrid_frozen": "Hybrid-Frozen",
         "hybrid_frozen_stribeck": "Hybrid-Frozen-Stribeck",
+        # --- new integrated models ---
+        "ude": "UDE",
+        "neural_sde": "Neural-SDE",
+        "gru": "GRU",
+        "lstm": "LSTM",
+        "tcn": "TCN",
+        "mamba": "Mamba",
+        "feedforward_nn": "Feedforward-NN",
     }
     return mapping.get(model_key, model_key)
 

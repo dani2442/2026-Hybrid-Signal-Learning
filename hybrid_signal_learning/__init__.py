@@ -1,6 +1,6 @@
 """Hybrid signal learning utilities for BAB identification and artifact export."""
 
-from .bab_data import (
+from .data import (
     ExperimentData,
     TrainRolloutData,
     build_train_rollout_data,
@@ -8,7 +8,7 @@ from .bab_data import (
     load_protocol2_datasets,
     summarize_protocol2,
 )
-from .bab_io import (
+from .io import (
     aggregate_metric_rows,
     load_model_prediction_npz,
     make_run_dir,
@@ -19,7 +19,7 @@ from .bab_io import (
     timestamp_tag,
     write_json,
 )
-from .bab_models import (
+from .models import (
     MODEL_KEYS,
     NN_VARIANTS,
     AdaptiveBlackBoxODE,
@@ -32,6 +32,13 @@ from .bab_models import (
     LinearPhysODE,
     StribeckPhysODE,
     StructuredBlackBoxODE,
+    UDEODE,
+    SequenceModelBase,
+    GRUSeqModel,
+    LSTMSeqModel,
+    TCNSeqModel,
+    MambaSeqModel,
+    FeedForwardNN,
     build_model,
     extract_linear_params,
     extract_stribeck_params,
@@ -40,7 +47,7 @@ from .bab_models import (
     model_label,
     save_model_checkpoint,
 )
-from .bab_plots import (
+from .plots import (
     DEFAULT_COLORS,
     DEFAULT_STYLES,
     model_display_name,
@@ -53,7 +60,7 @@ from .bab_plots import (
     plot_y_vs_yhat,
     plot_zoom_position,
 )
-from .bab_train import (
+from .train import (
     TrainConfig,
     compute_split_metrics,
     evaluate_model_on_dataset,
@@ -82,6 +89,13 @@ __all__ = [
     "HybridJointStribeckODE",
     "HybridFrozenPhysODE",
     "HybridFrozenStribeckPhysODE",
+    "UDEODE",
+    "SequenceModelBase",
+    "GRUSeqModel",
+    "LSTMSeqModel",
+    "TCNSeqModel",
+    "MambaSeqModel",
+    "FeedForwardNN",
     "build_model",
     "extract_linear_params",
     "extract_stribeck_params",
