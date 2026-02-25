@@ -55,6 +55,7 @@ def train_model(
     cfg: TrainConfig,
     show_progress: bool = False,
     progress_desc: str = "",
+    rng: np.random.Generator | None = None,
 ) -> tuple[nn.Module, list[dict[str, float]]]:
     """Unified training loop for all model types.
 
@@ -62,7 +63,16 @@ def train_model(
     k_steps, obs_dim) -> Tensor[K, B, obs_dim]``.  The training loop
     samples random windows, delegates prediction to the model, and
     computes MSE against the ground truth.
+
+    Parameters
+    ----------
+    rng : np.random.Generator | None
+        Thread-safe RNG for sampling mini-batch start indices.
+        When *None* the legacy ``np.random`` global state is used
+        (not safe for concurrent threads).
     """
+    _rng = rng if rng is not None else np.random
+
     model.train()
     model.to(tensors.t.device)
 
@@ -81,7 +91,7 @@ def train_model(
     for epoch in epoch_iter:
         optimizer.zero_grad()
 
-        start_idx = np.random.choice(valid_start_indices, size=cfg.batch_size, replace=True)
+        start_idx = _rng.choice(valid_start_indices, size=cfg.batch_size, replace=True)
 
         # Model-specific k-step prediction
         pred_obs = model.predict_k_steps(tensors, start_idx, cfg.k_steps, cfg.obs_dim)

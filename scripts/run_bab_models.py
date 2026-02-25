@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import sys
 from typing import Any
@@ -95,6 +97,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--progress", action="store_true", default=True, help="Show tqdm progress bars when available")
     parser.add_argument("--no-progress", action="store_false", dest="progress", help="Disable progress bars")
 
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Max parallel training threads (0 = auto: #GPUs if CUDA else 1). "
+             "Each worker gets its own GPU via round-robin when multiple GPUs are available.",
+    )
+
     return parser.parse_args()
 
 
@@ -106,6 +116,24 @@ def select_device(device_arg: str) -> torch.device:
             raise RuntimeError("CUDA requested but not available")
         return torch.device("cuda")
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _available_devices(device_arg: str) -> list[torch.device]:
+    """Return an ordered list of devices to round-robin across workers."""
+    if device_arg == "cpu":
+        return [torch.device("cpu")]
+    if torch.cuda.is_available():
+        n = torch.cuda.device_count()
+        return [torch.device(f"cuda:{i}") for i in range(n)]
+    return [torch.device("cpu")]
+
+
+def _resolve_workers(workers_arg: int, n_devices: int) -> int:
+    """Return the actual worker count."""
+    if workers_arg > 0:
+        return workers_arg
+    # auto: one worker per GPU, minimum 1
+    return max(n_devices, 1)
 
 
 def main() -> None:
@@ -123,10 +151,16 @@ def main() -> None:
         if include_datasets is None:
             include_datasets = ["multisine_05", "multisine_06", "random_steps_01", "swept_sine"]
 
-    device = select_device(args.device)
-    print(f"Using device: {device}")
-    if device.type == "cuda":
-        print(f"  CUDA device: {torch.cuda.get_device_name(device)}")
+    # ── Device & worker setup ─────────────────────────────────────────
+    devices = _available_devices(args.device)
+    n_workers = _resolve_workers(args.workers, len(devices))
+    primary_device = devices[0]
+
+    print(f"Available devices: {[str(d) for d in devices]}")
+    print(f"Parallel workers: {n_workers}")
+    for d in devices:
+        if d.type == "cuda":
+            print(f"  {d}: {torch.cuda.get_device_name(d)}")
     print("Protocol: fixed protocol-2 (temporal 50/50 for core datasets)")
     if args.progress and tqdm is None:
         print("Progress bars requested but tqdm is not installed; falling back to plain logs.")
@@ -142,12 +176,16 @@ def main() -> None:
     train_data = build_train_rollout_data(data_map)
     valid_starts = compute_valid_start_indices(train_data.segments, k_steps=args.k_steps)
 
-    tensors = to_tensor_bundle(
-        t=train_data.t,
-        u=train_data.u,
-        y_sim=train_data.y_sim,
-        device=device,
-    )
+    # Build one TensorBundle per device so workers sharing a GPU reuse
+    # the same tensors (read-only during training after set_series).
+    tensor_bundles: dict[torch.device, Any] = {}
+    for dev in devices:
+        tensor_bundles[dev] = to_tensor_bundle(
+            t=train_data.t,
+            u=train_data.u,
+            y_sim=train_data.y_sim,
+            device=dev,
+        )
 
     train_cfg = TrainConfig(
         epochs=args.epochs,
@@ -172,7 +210,8 @@ def main() -> None:
         "k_steps": args.k_steps,
         "obs_dim": args.obs_dim,
         "seed": args.seed,
-        "device": str(device),
+        "devices": [str(d) for d in devices],
+        "n_workers": n_workers,
         "resample_factor": args.resample_factor,
         "y_dot_method": args.y_dot_method,
         "zoom_last_n": args.zoom_last_n,
@@ -182,13 +221,27 @@ def main() -> None:
     }
     write_json(run_dir / "metadata" / "config.json", config_dump)
 
+    # ── Thread-safe accumulators ──────────────────────────────────────
+    _lock = threading.Lock()
     history_rows: list[dict[str, Any]] = []
     metrics_rows: list[dict[str, Any]] = []
     history_by_model_id: dict[str, list[dict[str, float]]] = {}
     registry_rows: list[dict[str, Any]] = []
 
+    # Monotonic counter for round-robin device assignment.
+    _task_counter = 0
+    _counter_lock = threading.Lock()
+
+    def _next_device() -> torch.device:
+        nonlocal _task_counter
+        with _counter_lock:
+            dev = devices[_task_counter % len(devices)]
+            _task_counter += 1
+        return dev
+
     requested_specs = iter_model_specs(model_keys, nn_variants)
 
+    # ── Core worker function (runs in a thread) ──────────────────────
     def train_and_evaluate(
         *,
         model,
@@ -196,10 +249,35 @@ def main() -> None:
         nn_variant: str,
         run_idx: int,
         seed_value: int,
+        device: torch.device,
         extra_meta: dict[str, Any] | None = None,
-    ) -> None:
+        signal_event: threading.Event | None = None,
+        ref_holder: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Train one model, evaluate, persist artifacts, return result dict.
+
+        Thread-safe: uses per-task RNG and only appends to shared lists
+        under a lock.
+
+        Parameters
+        ----------
+        signal_event : threading.Event | None
+            Set after training finishes so dependent workers can proceed.
+        ref_holder : dict | None
+            Mutable dict where the trained model is stored under key
+            ``"model"`` so dependents can read it after *signal_event*.
+        """
         model_id = f"{model_key}__{nn_variant}__run{run_idx:02d}"
-        print(f"\n=== Training {model_id} ===")
+        print(f"\n=== Training {model_id} on {device} ===")
+
+        # Per-task reproducible RNG (avoids contention on global state).
+        task_rng = np.random.default_rng(seed_value + hash(model_id) % (2**31))
+
+        # Per-task torch seed (thread-local generator).
+        torch.manual_seed(seed_value + hash(model_id) % (2**31))
+
+        tensors = tensor_bundles[device]
+        model = model.to(device)
 
         trained_model, hist = train_model(
             model=model,
@@ -207,12 +285,19 @@ def main() -> None:
             valid_start_indices=valid_starts,
             cfg=train_cfg,
             show_progress=args.progress,
-            progress_desc=model_id,
+            progress_desc=f"{model_id}@{device}",
+            rng=task_rng,
         )
 
-        history_by_model_id[model_id] = hist
+        # Signal dependents that this physics model is ready.
+        if signal_event is not None and ref_holder is not None:
+            ref_holder["model"] = trained_model
+            signal_event.set()
+
+        # Build local rows first, then bulk-append under lock.
+        local_history: list[dict[str, Any]] = []
         for item in hist:
-            history_rows.append(
+            local_history.append(
                 {
                     "model_id": model_id,
                     "model_key": model_key,
@@ -235,6 +320,7 @@ def main() -> None:
             extra=extra_meta,
         )
 
+        local_metrics: list[dict[str, Any]] = []
         eval_results: dict[str, dict[str, Any]] = {}
         for ds_name, ds in data_map.items():
             out = evaluate_model_on_dataset(model=trained_model, ds=ds, device=device)
@@ -244,7 +330,7 @@ def main() -> None:
                 mm = out["metrics"][split]
                 if mm is None:
                     continue
-                metrics_rows.append(
+                local_metrics.append(
                     {
                         "model_id": model_id,
                         "model_key": model_key,
@@ -261,77 +347,182 @@ def main() -> None:
         if args.save_predictions:
             save_model_prediction_npz(pred_path, data_map=data_map, eval_results=eval_results)
 
-        registry_rows.append(
-            {
-                "model_id": model_id,
-                "model_key": model_key,
-                "nn_variant": nn_variant,
-                "run_idx": run_idx,
-                "seed": seed_value,
-                "checkpoint_path": str(ckpt_path),
-                "prediction_path": str(pred_path) if args.save_predictions else None,
-                "extra": extra_meta or {},
+        reg_entry = {
+            "model_id": model_id,
+            "model_key": model_key,
+            "nn_variant": nn_variant,
+            "run_idx": run_idx,
+            "seed": seed_value,
+            "checkpoint_path": str(ckpt_path),
+            "prediction_path": str(pred_path) if args.save_predictions else None,
+            "extra": extra_meta or {},
+        }
+
+        # Append to shared accumulators under lock.
+        with _lock:
+            history_rows.extend(local_history)
+            history_by_model_id[model_id] = hist
+            metrics_rows.extend(local_metrics)
+            registry_rows.append(reg_entry)
+
+        print(f"  ✓ {model_id} done on {device}")
+        return {"model_id": model_id, "model": trained_model}
+
+    # ── Deferred worker for hybrid_frozen* models ─────────────────────
+    # These closures wait for the physics dependency, extract frozen
+    # params, build the model, and then train — all inside the thread.
+    def _make_frozen_worker(
+        *,
+        model_key: str,
+        nn_variant: str,
+        run_idx: int,
+        run_seed: int,
+        device: torch.device,
+        wait_event: threading.Event,
+        ref_holder: dict[str, Any],
+        physics_label: str,
+        extract_fn,
+    ):
+        """Return a zero-arg callable suitable for ``pool.submit``."""
+        def _worker():
+            print(f"  ⏳ {model_key}__{nn_variant}__run{run_idx:02d} waiting for {physics_label} …")
+            wait_event.wait()
+            print(f"  ▶ {model_key}__{nn_variant}__run{run_idx:02d} dependency ready, building model")
+            ref_model = ref_holder["model"]
+            frozen = extract_fn(ref_model)
+            model = build_model(model_key, nn_variant=nn_variant, frozen_phys_params=frozen)
+            extra = {
+                "frozen_from": f"{physics_label}__physics__run{run_idx:02d}",
+                "frozen_phys": copy.deepcopy(frozen),
             }
-        )
-
-    for run_idx in range(args.n_runs):
-        run_seed = args.seed + run_idx
-        set_global_seed(run_seed)
-        print(f"\n\n########## RUN {run_idx:02d} | seed={run_seed} ##########")
-
-        # Linear can be both a target model and a dependency for hybrid_frozen.
-        linear_ref_model = None
-        stribeck_ref_model = None
-        if ("linear" in model_keys) or ("hybrid_frozen" in model_keys):
-            linear_ref_model = build_model("linear").to(device)
-            train_and_evaluate(
-                model=linear_ref_model,
-                model_key="linear",
-                nn_variant="physics",
-                run_idx=run_idx,
-                seed_value=run_seed,
-            )
-
-        if ("stribeck" in model_keys) or ("hybrid_frozen_stribeck" in model_keys):
-            stribeck_ref_model = build_model("stribeck").to(device)
-            train_and_evaluate(
-                model=stribeck_ref_model,
-                model_key="stribeck",
-                nn_variant="physics",
-                run_idx=run_idx,
-                seed_value=run_seed,
-            )
-
-        for model_key, nn_variant in requested_specs:
-            if model_key in {"linear", "stribeck"}:
-                continue
-
-            if model_key == "hybrid_frozen":
-                if linear_ref_model is None:
-                    raise RuntimeError("Hybrid frozen requested but no linear reference model available")
-                frozen = extract_linear_params(linear_ref_model)
-                model = build_model("hybrid_frozen", nn_variant=nn_variant, frozen_phys_params=frozen).to(device)
-                extra = {"frozen_from": f"linear__physics__run{run_idx:02d}", "frozen_phys": copy.deepcopy(frozen)}
-            elif model_key == "hybrid_frozen_stribeck":
-                if stribeck_ref_model is None:
-                    raise RuntimeError("Hybrid frozen stribeck requested but no stribeck reference model available")
-                frozen = extract_stribeck_params(stribeck_ref_model)
-                model = build_model("hybrid_frozen_stribeck", nn_variant=nn_variant, frozen_phys_params=frozen).to(device)
-                extra = {"frozen_from": f"stribeck__physics__run{run_idx:02d}", "frozen_phys": copy.deepcopy(frozen)}
-            else:
-                model = build_model(model_key, nn_variant=nn_variant).to(device)
-                extra = None
-
-            train_and_evaluate(
+            return train_and_evaluate(
                 model=model,
                 model_key=model_key,
                 nn_variant=nn_variant,
                 run_idx=run_idx,
                 seed_value=run_seed,
+                device=device,
                 extra_meta=extra,
             )
+        return _worker
 
-    # Persist tables and metadata.
+    # ── Main training loop ────────────────────────────────────────────
+    for run_idx in range(args.n_runs):
+        run_seed = args.seed + run_idx
+        set_global_seed(run_seed)
+        print(f"\n\n########## RUN {run_idx:02d} | seed={run_seed} ##########")
+
+        # Synchronisation: physics models signal these events once trained
+        # so hybrid_frozen* workers (waiting in the same pool) can proceed.
+        need_linear = ("linear" in model_keys) or ("hybrid_frozen" in model_keys)
+        need_stribeck = ("stribeck" in model_keys) or ("hybrid_frozen_stribeck" in model_keys)
+
+        linear_ready = threading.Event()
+        stribeck_ready = threading.Event()
+        linear_holder: dict[str, Any] = {}
+        stribeck_holder: dict[str, Any] = {}
+
+        # Collect tasks.  Each entry is either:
+        #   - dict  → kwargs for train_and_evaluate  (regular models)
+        #   - callable → deferred worker             (hybrid_frozen*)
+        pool_items: list[Any] = []
+
+        # Physics models (submitted to pool; signal event on completion).
+        if need_linear:
+            pool_items.append(
+                dict(
+                    model=build_model("linear"),
+                    model_key="linear",
+                    nn_variant="physics",
+                    run_idx=run_idx,
+                    seed_value=run_seed,
+                    device=_next_device(),
+                    signal_event=linear_ready,
+                    ref_holder=linear_holder,
+                )
+            )
+
+        if need_stribeck:
+            pool_items.append(
+                dict(
+                    model=build_model("stribeck"),
+                    model_key="stribeck",
+                    nn_variant="physics",
+                    run_idx=run_idx,
+                    seed_value=run_seed,
+                    device=_next_device(),
+                    signal_event=stribeck_ready,
+                    ref_holder=stribeck_holder,
+                )
+            )
+
+        # All remaining models.
+        for model_key, nn_variant in requested_specs:
+            if model_key in {"linear", "stribeck"}:
+                continue
+
+            dev = _next_device()
+
+            if model_key == "hybrid_frozen":
+                pool_items.append(
+                    _make_frozen_worker(
+                        model_key=model_key,
+                        nn_variant=nn_variant,
+                        run_idx=run_idx,
+                        run_seed=run_seed,
+                        device=dev,
+                        wait_event=linear_ready,
+                        ref_holder=linear_holder,
+                        physics_label="linear",
+                        extract_fn=extract_linear_params,
+                    )
+                )
+            elif model_key == "hybrid_frozen_stribeck":
+                pool_items.append(
+                    _make_frozen_worker(
+                        model_key=model_key,
+                        nn_variant=nn_variant,
+                        run_idx=run_idx,
+                        run_seed=run_seed,
+                        device=dev,
+                        wait_event=stribeck_ready,
+                        ref_holder=stribeck_holder,
+                        physics_label="stribeck",
+                        extract_fn=extract_stribeck_params,
+                    )
+                )
+            else:
+                pool_items.append(
+                    dict(
+                        model=build_model(model_key, nn_variant=nn_variant),
+                        model_key=model_key,
+                        nn_variant=nn_variant,
+                        run_idx=run_idx,
+                        seed_value=run_seed,
+                        device=dev,
+                    )
+                )
+
+        if n_workers <= 1:
+            # Sequential fallback.
+            for item in pool_items:
+                if callable(item):
+                    item()
+                else:
+                    train_and_evaluate(**item)
+        else:
+            print(f"\nDispatching {len(pool_items)} models across {n_workers} workers …")
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                futures = {}
+                for item in pool_items:
+                    if callable(item):
+                        futures[pool.submit(item)] = "frozen_deferred"
+                    else:
+                        futures[pool.submit(train_and_evaluate, **item)] = item.get("model_key", "?")
+                for fut in as_completed(futures):
+                    fut.result()  # propagate exceptions
+
+    # ── Persist tables and metadata ───────────────────────────────────
     save_training_history_csv(run_dir / "tables" / "training_history.csv", history_rows)
     save_metrics_csv(run_dir / "tables" / "metrics_long.csv", metrics_rows)
 
