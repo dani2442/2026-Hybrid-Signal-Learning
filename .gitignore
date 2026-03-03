@@ -1,6 +1,22 @@
 results/
 uv.lock
 
+# Large binary files (too large for GitHub push)
+checkpoints/
+*.MOV
+*.mp4
+*.data-00000-of-00001
+*.index
+*.tfevents.*
+*.pickle
+*.h5
+*.png
+bab_bar_2pts_dlc3-Dani_F-2026-02-24/labeled-data/
+bab_bar_2pts_dlc3-Dani_F-2026-02-24/videos/
+
+# macOS
+.DS_Store
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

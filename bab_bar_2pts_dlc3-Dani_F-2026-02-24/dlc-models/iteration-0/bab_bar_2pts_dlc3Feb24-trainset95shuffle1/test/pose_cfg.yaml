@@ -1,0 +1,14 @@
+all_joints:
+- - 0
+- - 1
+all_joints_names:
+- beam_left
+- beam_right
+dataset: training-datasets/iteration-0/UnaugmentedDataSet_bab_bar_2pts_dlc3Feb24/bab_bar_2pts_dlc3_Dani_F95shuffle1.mat
+global_scale: 0.8
+init_weights: /opt/miniconda3/envs/DEEPLABCUT/lib/python3.12/site-packages/deeplabcut/pose_estimation_tensorflow/models/pretrained/resnet_v1_50.ckpt
+location_refinement: true
+locref_stdev: 7.2801
+net_type: resnet_50
+num_joints: 2
+scoremap_dir: test
