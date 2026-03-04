@@ -63,7 +63,7 @@ def heatmaps_to_keypoints(heatmaps: torch.Tensor, orig_h: int, orig_w: int,
 
         x_orig = (cx / Wm * orig_w).item()
         y_orig = (cy / Hm * orig_h).item()
-        confidence = hmap.max().item()
+        confidence = torch.sigmoid(hmap.max()).item()
 
         name = KEYPOINT_NAMES[k] if k < len(KEYPOINT_NAMES) else f"kp_{k}"
         results[name] = (x_orig, y_orig, confidence)
