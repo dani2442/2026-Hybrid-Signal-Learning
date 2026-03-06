@@ -17,6 +17,10 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 KEYPOINT_NAMES = ["beam_left", "beam_right"]
 
+# DLC default stride and location-refinement scaling factor
+DLC_STRIDE = 8.0
+DLC_LOCREF_STDEV = 7.2801
+
 
 def preprocess_frame_dlc(frame_bgr: np.ndarray) -> torch.Tensor:
     """
@@ -37,10 +41,18 @@ def preprocess_frame_imagenet(frame_bgr: np.ndarray, input_size=(256, 256)) -> t
 
 
 def heatmaps_to_keypoints(heatmaps: torch.Tensor, orig_h: int, orig_w: int,
-                           use_softargmax: bool = True) -> dict:
+                           locref: torch.Tensor = None) -> dict:
     """
-    Extracts keypoint coordinates from heatmaps.
-    Uses soft-argmax for sub-pixel precision (as DLC does internally).
+    Extracts keypoint coordinates from heatmaps using argmax + location refinement.
+    Matches DLC's ``argmax_pose_predict``:
+
+        x = col * stride + 0.5 * stride + locref_x * locref_stdev
+        y = row * stride + 0.5 * stride + locref_y * locref_stdev
+
+    Args:
+        heatmaps: (B, K, Hm, Wm) part prediction heatmaps
+        locref: (B, 2K, Hm, Wm) raw location refinement offsets (optional).
+                For keypoint k, channel 2k = x offset, channel 2k+1 = y offset.
     """
     B, K, Hm, Wm = heatmaps.shape
     results = {}
@@ -48,21 +60,21 @@ def heatmaps_to_keypoints(heatmaps: torch.Tensor, orig_h: int, orig_w: int,
     for k in range(K):
         hmap = heatmaps[0, k]
 
-        if use_softargmax:
-            beta = 100.0
-            probs = torch.softmax((hmap * beta).reshape(-1), dim=0).reshape(Hm, Wm)
-            yy = torch.arange(Hm, dtype=torch.float32, device=hmap.device)
-            xx = torch.arange(Wm, dtype=torch.float32, device=hmap.device)
-            grid_y, grid_x = torch.meshgrid(yy, xx, indexing="ij")
-            cy = (probs * grid_y).sum()
-            cx = (probs * grid_x).sum()
-        else:
-            flat_idx = hmap.reshape(-1).argmax()
-            cy = (flat_idx // Wm).float()
-            cx = (flat_idx % Wm).float()
+        # Argmax to find peak location in heatmap space
+        flat_idx = hmap.reshape(-1).argmax()
+        row = (flat_idx // Wm).item()
+        col = (flat_idx % Wm).item()
 
-        x_orig = (cx / Wm * orig_w).item()
-        y_orig = (cy / Hm * orig_h).item()
+        # DLC coordinate formula: pos = argmax * stride + 0.5 * stride + offset
+        if locref is not None:
+            dx = locref[0, 2 * k,     row, col].item() * DLC_LOCREF_STDEV
+            dy = locref[0, 2 * k + 1, row, col].item() * DLC_LOCREF_STDEV
+        else:
+            dx, dy = 0.0, 0.0
+
+        x_orig = col * DLC_STRIDE + 0.5 * DLC_STRIDE + dx
+        y_orig = row * DLC_STRIDE + 0.5 * DLC_STRIDE + dy
+
         confidence = torch.sigmoid(hmap.max()).item()
 
         name = KEYPOINT_NAMES[k] if k < len(KEYPOINT_NAMES) else f"kp_{k}"
@@ -81,20 +93,17 @@ def compute_theta(keypoints: dict) -> float:
 @torch.no_grad()
 def predict_frame_dlc(model: DLCResNet50, frame_bgr: np.ndarray, device="cpu"):
     """Inference with the converted DLC model (native resolution, DLC preprocessing)."""
-    model.eval()
-    model.to(device)
     orig_h, orig_w = frame_bgr.shape[:2]
     inp = preprocess_frame_dlc(frame_bgr).to(device)
     out = model(inp)
-    return heatmaps_to_keypoints(out["part_pred"], orig_h, orig_w)
+    locref = out.get("locref_pred", None)
+    return heatmaps_to_keypoints(out["part_pred"], orig_h, orig_w, locref=locref)
 
 
 @torch.no_grad()
 def predict_frame(model: PoseResNet50, frame_bgr: np.ndarray,
                   input_size=(256, 256), device="cpu"):
     """Inference with the PoseResNet50 model (resized, ImageNet preprocessing)."""
-    model.eval()
-    model.to(device)
     orig_h, orig_w = frame_bgr.shape[:2]
     inp = preprocess_frame_imagenet(frame_bgr, input_size).to(device)
     heatmaps = model(inp)
