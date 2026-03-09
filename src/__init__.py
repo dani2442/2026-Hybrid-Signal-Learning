@@ -44,6 +44,7 @@ from .visualization import (
     plot_model_comparison,
 )
 from .validation import Metrics
+from . import vision
 
 __version__ = "0.1.0"
 __all__ = [
@@ -85,4 +86,5 @@ __all__ = [
     "plot_residuals",
     "plot_signals",
     "plot_model_comparison",
+    "vision",
 ]

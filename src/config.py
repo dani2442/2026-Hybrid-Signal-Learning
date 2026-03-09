@@ -290,6 +290,50 @@ class BlackboxCDE2DConfig(BaseConfig):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Vision / multimodal
+# ─────────────────────────────────────────────────────────────────────
+
+@dataclass
+class EncoderConfig(BaseConfig):
+    """Config for vision encoder training."""
+    encoder_type: str = "theta_regression"   # "theta_regression" | "pose_heatmap"
+    pretrained: bool = True
+    state_dim: int = 2
+    frame_height: int = 224
+    frame_width: int = 224
+
+
+@dataclass
+class DecoderConfig(BaseConfig):
+    """Config for state → keypoints decoder training."""
+    state_dim: int = 2
+    output_dim: int = 4    # [x_l, y_l, x_r, y_r]
+    hidden_dim: int = 128
+
+
+@dataclass
+class EncOdeDecConfig(BaseConfig):
+    """Config for end-to-end encoder → ODE → decoder training."""
+    encoder_type: str = "theta_regression"
+    pretrained: bool = True
+    state_dim: int = 2
+    dt: float = 0.05
+    k_steps: int = 20
+    ode_hidden_dim: int = 128
+    decoder_output_dim: int = 4
+    decoder_hidden_dim: int = 128
+    freeze_ode_epochs: int = 0
+    loss_weight_enc: float = 1.0
+    loss_weight_ode: float = 1.0
+    loss_weight_dec: float = 1.0
+    loss_weight_smooth: float = 0.0
+    frame_height: int = 224
+    frame_width: int = 224
+    video_fps: float = 30.0
+    resample_factor: int = 50
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Registry: model name → config class
 # ─────────────────────────────────────────────────────────────────────
 
@@ -320,4 +364,7 @@ MODEL_CONFIGS: Dict[str, type] = {
     "vanilla_nsde_2d": BlackboxSDE2DConfig,
     "structured_nsde": BlackboxSDE2DConfig,
     "adaptive_nsde": BlackboxSDE2DConfig,
+    "encoder": EncoderConfig,
+    "decoder": DecoderConfig,
+    "enc_ode_dec": EncOdeDecConfig,
 }

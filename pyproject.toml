@@ -11,8 +11,16 @@ dependencies = [
     "scikit-learn>=1.8.0",
     "statsmodels>=0.14.6",
     "torch>=2.10.0",
+    "torchdiffeq>=0.2.4",
     "torchcde>=0.2.5",
     "torchsde>=0.2.6",
+    "torchvision>=0.22.0",
     "tqdm>=4.67.2",
     "wandb>=0.24.2",
+]
+
+[project.optional-dependencies]
+vision = [
+    "opencv-python>=4.8.0",
+    "imageio>=2.34.0",
 ]
