@@ -1,9 +1,10 @@
 """Neural network architectures for ball-and-beam pose estimation."""
 
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import resnet50
 
 
 # ── DLCResNet50: exact replica of the DLC TF architecture ──
@@ -119,6 +120,7 @@ class PoseResNet50(nn.Module):
     """
     def __init__(self, num_keypoints: int = 2, pretrained_backbone: bool = False):
         super().__init__()
+        from torchvision.models import resnet50
         base = resnet50(pretrained=pretrained_backbone)
         self.backbone = nn.Sequential(*list(base.children())[:-2])
 
@@ -139,3 +141,122 @@ class PoseResNet50(nn.Module):
         features = self.backbone(x)
         upsampled = self.deconv_head(features)
         return self.heatmap_head(upsampled)
+
+
+# ── BAB Autoencoder: Encoder-Decoder for video bottleneck architecture ──
+
+class BABEncoder(nn.Module):
+    """ResNet-50 encoder that maps a 256×256 RGB frame to a low-dim latent vector.
+
+    Reuses the DLCResNet50 backbone (stem + blocks 1-4) and replaces the
+    prediction heads with global average pooling + linear projection.
+
+    Can be initialized from a pretrained DLCResNet50 checkpoint.
+    """
+
+    def __init__(self, latent_dim: int = 2):
+        super().__init__()
+        self.latent_dim = latent_dim
+
+        # Backbone (same as DLCResNet50)
+        self.conv1 = nn.Conv2d(3, 64, 7, stride=2, padding=3, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        self.block1 = _make_block(64, 64, 256, num_units=3, last_stride=2)
+        self.block2 = _make_block(256, 128, 512, num_units=4, last_stride=2)
+        self.block3 = _make_block(512, 256, 1024, num_units=6, last_stride=1)
+        self.block4 = _make_block(1024, 512, 2048, num_units=3, last_stride=1, dilation=2)
+
+        # Projection head
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Linear(2048, latent_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, 3, 256, 256) → (B, latent_dim)"""
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.maxpool(x)
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.block3(x)
+        x = self.block4(x)
+        x = self.pool(x).flatten(1)
+        return self.fc(x)
+
+    def load_dlc_backbone(self, dlc_state_dict: dict[str, torch.Tensor]) -> None:
+        """Load backbone weights from a DLCResNet50 state dict (ignoring prediction heads)."""
+        own = self.state_dict()
+        loaded = 0
+        for key, val in dlc_state_dict.items():
+            if key.startswith(("part_pred", "locref_pred")):
+                continue
+            if key in own and val.shape == own[key].shape:
+                own[key] = val
+                loaded += 1
+        self.load_state_dict(own)
+        print(f"BABEncoder: loaded {loaded} backbone parameters from DLC checkpoint")
+
+
+class BABDecoder(nn.Module):
+    """Deconvolutional decoder that maps a latent vector to a 256×256 RGB image."""
+
+    def __init__(self, latent_dim: int = 2):
+        super().__init__()
+        self.latent_dim = latent_dim
+
+        self.fc = nn.Linear(latent_dim, 512 * 4 * 4)
+
+        self.deconv = nn.Sequential(
+            # 4×4 → 8×8
+            nn.ConvTranspose2d(512, 256, 4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            # 8×8 → 16×16
+            nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            # 16×16 → 32×32
+            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            # 32×32 → 64×64
+            nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            # 64×64 → 128×128
+            nn.ConvTranspose2d(32, 16, 4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),
+            # 128×128 → 256×256
+            nn.ConvTranspose2d(16, 3, 4, stride=2, padding=1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        """(B, latent_dim) → (B, 3, 256, 256)"""
+        x = self.fc(z)
+        x = x.view(-1, 512, 4, 4)
+        return self.deconv(x)
+
+
+class BABAutoencoder(nn.Module):
+    """Bottleneck autoencoder: Encoder (ResNet) → latent z → Decoder → reconstructed frame."""
+
+    def __init__(self, latent_dim: int = 2):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.encoder = BABEncoder(latent_dim=latent_dim)
+        self.decoder = BABDecoder(latent_dim=latent_dim)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns (x_recon, z)."""
+        z = self.encoder(x)
+        x_recon = self.decoder(z)
+        return x_recon, z
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(x)
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        return self.decoder(z)
