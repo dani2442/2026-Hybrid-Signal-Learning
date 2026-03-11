@@ -153,7 +153,7 @@ def _plot_video_to_sensor(
     if theta_video_label is not None and np.any(np.isfinite(theta_video_label)):
         finite = np.isfinite(theta_video_label)
         ax.scatter(t[finite], theta_video_label[finite], label="video theta label (aligned)",
-                   marker="x", s=28, linewidths=0.9, alpha=0.8, zorder=3)
+                   marker="x", s=28, linewidths=0.9, alpha=0.8, zorder=3, c="tab:green")
     ax.set_title("Video -> Sensor")
     ax.set_xlabel("time [s]")
     ax.set_ylabel("theta [deg]")
@@ -386,31 +386,43 @@ def _plot_sensor_to_video_image_montage(
 
 
 def _load_ode_func(args):
-    from src.models.blackbox_ode import _build_structured
-
     if args.ode_checkpoint:
         from src.models.base import load_model
 
         model = load_model(args.ode_checkpoint)
         if hasattr(model, "func_") and model.func_ is not None:
             return model.func_
-        raise ValueError(f"Checkpoint {args.ode_checkpoint} does not expose 'func_'.")
+        if hasattr(model, "ode_func_") and model.ode_func_ is not None:
+            return model.ode_func_
+        raise ValueError(
+            f"Checkpoint {args.ode_checkpoint} does not expose 'func_' or 'ode_func_'."
+        )
 
-    print("No --ode-checkpoint given; creating a fresh StructuredNODE dynamics.")
-    return _build_structured(hidden_dim=128)
+    if args.ode_model == "linear_physics":
+        from src.models.physics_ode import _build_linear_ode
+
+        print("No --ode-checkpoint given; creating a fresh LinearPhysics dynamics.")
+        return _build_linear_ode()
+    if args.ode_model == "stribeck_physics":
+        from src.models.physics_ode import _build_stribeck_ode
+
+        print("No --ode-checkpoint given; creating a fresh StribeckPhysics dynamics.")
+        return _build_stribeck_ode()
+    if args.ode_model == "structured_node":
+        from src.models.blackbox_ode import _build_structured
+
+        print("No --ode-checkpoint given; creating a fresh StructuredNODE dynamics.")
+        return _build_structured(hidden_dim=args.ode_hidden_dim)
+    raise ValueError(f"Unsupported --ode-model: {args.ode_model}")
 
 
 def _train_ode_model_separate(args, data, run_dir: Path):
-    from src.config import BlackboxODE2DConfig
-    from src.models.blackbox_ode import StructuredNODE
-
     n = len(data)
     tr, va, te = _split_indices(n)
 
-    ode_cfg = BlackboxODE2DConfig(
-        hidden_dim=args.ode_hidden_dim,
-        dt=(1.0 / data.sampling_rate if data.sampling_rate > 0 else 1.0),
-        k_steps=args.k_steps,
+    dt = 1.0 / data.sampling_rate if data.sampling_rate > 0 else 1.0
+    common_cfg = dict(
+        dt=dt,
         epochs=args.ode_epochs if args.ode_epochs is not None else args.epochs,
         batch_size=args.ode_batch_size if args.ode_batch_size is not None else args.batch_size,
         learning_rate=args.ode_lr if args.ode_lr is not None else args.lr,
@@ -420,7 +432,32 @@ def _train_ode_model_separate(args, data, run_dir: Path):
         wandb_project=args.wandb,
         wandb_run_name=f"ode_{args.dataset}",
     )
-    model = StructuredNODE(ode_cfg)
+
+    if args.ode_model == "linear_physics":
+        from src.config import LinearPhysicsConfig
+        from src.models.physics_ode import LinearPhysics
+
+        ode_cfg = LinearPhysicsConfig(**common_cfg)
+        model = LinearPhysics(ode_cfg)
+    elif args.ode_model == "stribeck_physics":
+        from src.config import StribeckPhysicsConfig
+        from src.models.physics_ode import StribeckPhysics
+
+        ode_cfg = StribeckPhysicsConfig(**common_cfg)
+        model = StribeckPhysics(ode_cfg)
+    elif args.ode_model == "structured_node":
+        from src.config import BlackboxODE2DConfig
+        from src.models.blackbox_ode import StructuredNODE
+
+        ode_cfg = BlackboxODE2DConfig(
+            hidden_dim=args.ode_hidden_dim,
+            k_steps=args.k_steps,
+            **common_cfg,
+        )
+        model = StructuredNODE(ode_cfg)
+    else:
+        raise ValueError(f"Unsupported --ode-model: {args.ode_model}")
+
     model.fit(
         train_data=(np.asarray(data.u)[tr], np.asarray(data.y)[tr]),
         val_data=(np.asarray(data.u)[va], np.asarray(data.y)[va]) if len(va) > 0 else None,
@@ -876,6 +913,12 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--k-steps", type=int, default=20, help="ODE rollout length.")
     parser.add_argument("--freeze-ode-epochs", type=int, default=0)
+    parser.add_argument(
+        "--ode-model",
+        default="linear_physics",
+        choices=["linear_physics", "structured_node", "stribeck_physics"],
+        help="ODE dynamics family (default: linear_physics).",
+    )
     parser.add_argument("--ode-hidden-dim", type=int, default=128, help="Hidden width for structured ODE.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto")

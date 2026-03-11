@@ -177,12 +177,6 @@ THETA_LABEL_REGISTRY: Dict[str, Dict[str, str]] = {}
 TRUE_LABEL_REGISTRY: Dict[str, Dict[str, str]] = {
     "swept_sine": {
         "filename": "swept_sine_true_labels.csv",
-        "url": (
-            "https://raw.githubusercontent.com/dani2442/"
-            "2026-Hybrid-Signal-Learning/danielf_video/"
-            "bab_bar_2pts_dlc3-Dani_F-2026-02-24/training-datasets/iteration-0/"
-            "UnaugmentedDataSet_bab_bar_2pts_dlc3Feb24/CollectedData_Dani_F.csv"
-        ),
     },
     "multisine_05": {
         "filename": "multisine_05_true_labels.csv",
