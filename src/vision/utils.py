@@ -198,6 +198,14 @@ def align_and_calibrate_theta(
         in_range = (sensor_t >= tt[0]) & (sensor_t <= tt[-1])
         sensor_theta_from_video[in_range] = np.interp(sensor_t[in_range], tt, yy)
 
+    # Also build a sparse version that has values only at sensor time-steps
+    # nearest to the actual (non-interpolated) video label instants.
+    sensor_theta_from_video_sparse = np.full_like(sensor_theta, np.nan, dtype=float)
+    if np.any(valid):
+        for t_v, y_v in zip(tt, yy):
+            idx = int(np.argmin(np.abs(sensor_t - t_v)))
+            sensor_theta_from_video_sparse[idx] = y_v
+
     # --- Compute quality metrics at the *actual* data points -----------
     # For sparse video data, computing metrics after dense interpolation
     # onto the sensor grid is misleading (linear interp can't reconstruct
@@ -236,6 +244,7 @@ def align_and_calibrate_theta(
         "video_t_aligned": shifted_t,
         "theta_video_aligned": theta_cal,
         "theta_sensor_aligned": sensor_theta_from_video,
+        "theta_sensor_aligned_sparse": sensor_theta_from_video_sparse,
     }
 
 

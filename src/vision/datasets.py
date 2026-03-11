@@ -362,6 +362,7 @@ def load_bab_with_video(
 
         aux["theta_video_aligned"] = np.asarray(theta_info["theta_video_aligned"], dtype=float)
         aux["theta_sensor_from_video"] = np.asarray(theta_info["theta_sensor_aligned"], dtype=float)
+        aux["theta_sensor_from_video_sparse"] = np.asarray(theta_info["theta_sensor_aligned_sparse"], dtype=float)
         aux["theta_alignment"] = {
             "offset_s": float(theta_info["offset_s"]),
             "sign": int(theta_info["sign"]),

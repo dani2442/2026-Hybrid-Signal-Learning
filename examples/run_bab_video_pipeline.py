@@ -459,7 +459,9 @@ def _run_encoder_only(args, encoder, data, frames, frame_idx_map, aux, run_dir):
 
     pred = _predict_encoder_framewise(encoder, test_ds, device=args.device)
     theta_video = None
-    if "theta_sensor_from_video" in aux:
+    if "theta_sensor_from_video_sparse" in aux:
+        theta_video = np.asarray(aux["theta_sensor_from_video_sparse"])[pred["idx"]]
+    elif "theta_sensor_from_video" in aux:
         theta_video = np.asarray(aux["theta_sensor_from_video"])[pred["idx"]]
     _plot_video_to_sensor(
         run_dir / "plot_video_to_sensor.png",
@@ -591,7 +593,9 @@ def _run_enc_ode(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     _save_metrics_csv(enc_metrics, run_dir / "metrics_video_to_sensor.csv")
     pred_enc = _predict_encoder_framewise(encoder, frame_test_ds, device=args.device)
     theta_video = None
-    if "theta_sensor_from_video" in aux:
+    if "theta_sensor_from_video_sparse" in aux:
+        theta_video = np.asarray(aux["theta_sensor_from_video_sparse"])[pred_enc["idx"]]
+    elif "theta_sensor_from_video" in aux:
         theta_video = np.asarray(aux["theta_sensor_from_video"])[pred_enc["idx"]]
     _plot_video_to_sensor(
         run_dir / "plot_video_to_sensor.png",
@@ -710,8 +714,11 @@ def _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     enc_metrics = evaluate_encoder_framewise(encoder, enc_test_ds, device=args.device)
     _save_metrics_csv(enc_metrics, run_dir / "metrics_video_to_sensor.csv")
     pred_enc = _predict_encoder_framewise(encoder, enc_test_ds, device=args.device)
+    # Use sparse (non-interpolated) video labels for the plot.
     theta_video = None
-    if "theta_sensor_from_video" in aux:
+    if "theta_sensor_from_video_sparse" in aux:
+        theta_video = np.asarray(aux["theta_sensor_from_video_sparse"])[pred_enc["idx"]]
+    elif "theta_sensor_from_video" in aux:
         theta_video = np.asarray(aux["theta_sensor_from_video"])[pred_enc["idx"]]
     _plot_video_to_sensor(
         run_dir / "plot_video_to_sensor.png",
@@ -726,7 +733,15 @@ def _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     u_test = np.asarray(data.u, dtype=float)[te]
     y_test = np.asarray(data.y, dtype=float)[te]
     t_test = np.asarray(data.t, dtype=float)[te]
-    y_pred_osa = np.asarray(ode_model.predict_osa(u_test, y_test), dtype=float)
+    osa_full = np.asarray(ode_model.predict_osa(u_test, y_test), dtype=float)
+
+    # predict_osa now returns (N, 2) with [theta, theta_dot]
+    if osa_full.ndim == 2 and osa_full.shape[1] >= 2:
+        y_pred_osa = osa_full[:, 0]
+        td_pred_osa_raw = osa_full[:, 1]
+    else:
+        y_pred_osa = osa_full.flatten()
+        td_pred_osa_raw = None
 
     n_osa = min(len(y_pred_osa), max(0, len(y_test) - 1))
     y_true_osa = y_test[1 : 1 + n_osa]
@@ -739,7 +754,11 @@ def _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     else:
         td_true_full = np.gradient(y_test, dt)
     td_true_osa = td_true_full[1 : 1 + n_osa]
-    td_pred_osa = np.gradient(y_pred_osa, dt) if n_osa > 1 else np.zeros_like(y_pred_osa)
+    # Use the model's own theta_dot state instead of noisy numerical gradient
+    if td_pred_osa_raw is not None:
+        td_pred_osa = td_pred_osa_raw[:n_osa]
+    else:
+        td_pred_osa = np.gradient(y_pred_osa, dt) if n_osa > 1 else np.zeros_like(y_pred_osa)
 
     ode_metrics = {
         "rmse_theta": Metrics.rmse(y_true_osa, y_pred_osa),

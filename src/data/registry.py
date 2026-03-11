@@ -187,6 +187,27 @@ TRUE_LABEL_REGISTRY: Dict[str, Dict[str, str]] = {
     "multisine_05": {
         "filename": "multisine_05_true_labels.csv",
     },
+    "multisine_06": {
+        "filename": "multisine_06_true_labels.csv",
+    },
+    "rampa_positiva": {
+        "filename": "rampa_positiva_true_labels.csv",
+    },
+    "rampa_negativa": {
+        "filename": "rampa_negativa_true_labels.csv",
+    },
+    "random_steps_01": {
+        "filename": "random_steps_01_true_labels.csv",
+    },
+    "random_steps_02": {
+        "filename": "random_steps_02_true_labels.csv",
+    },
+    "random_steps_03": {
+        "filename": "random_steps_03_true_labels.csv",
+    },
+    "random_steps_04": {
+        "filename": "random_steps_04_true_labels.csv",
+    },
 }
 
 

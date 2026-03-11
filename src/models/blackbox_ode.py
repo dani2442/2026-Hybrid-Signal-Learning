@@ -373,8 +373,8 @@ class _BlackboxODE2D(BaseModel):
                     dtype=self._dtype, device=self._device,
                 )
                 pred = self._simulate_deterministic(u_seg, x0, t_seg)
-                preds.append(pred[-1, 0, 0].cpu().item())
-        return np.asarray(preds)
+                preds.append(pred[-1, 0, :].cpu().numpy())  # full [theta, theta_dot]
+        return np.asarray(preds)  # shape (N, 2)
 
     def predict_free_run(self, u, y_initial):
         import torch
