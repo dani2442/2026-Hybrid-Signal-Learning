@@ -8,64 +8,13 @@ from urllib.request import urlretrieve
 
 import numpy as np
 
-
-BAB_DATASET_REGISTRY: Dict[str, Dict[str, str]] = {
-    "rampa_positiva": {
-        "filename": "01_rampa_positiva.mat",
-        "url": "https://raw.githubusercontent.com/helonayala/sysid/main/data/01_rampa_positiva.mat",
-    },
-    "rampa_negativa": {
-        "filename": "02_rampa_negativa.mat",
-        "url": "https://raw.githubusercontent.com/helonayala/sysid/main/data/02_rampa_negativa.mat",
-    },
-    "random_steps_01": {
-        "filename": "03_random_steps_01.mat",
-        "url": "https://raw.githubusercontent.com/helonayala/sysid/main/data/03_random_steps_01.mat",
-    },
-    "random_steps_02": {
-        "filename": "03_random_steps_02.mat",
-        "url": "https://raw.githubusercontent.com/helonayala/sysid/main/data/03_random_steps_02.mat",
-    },
-    "random_steps_03": {
-        "filename": "03_random_steps_03.mat",
-        "url": "https://raw.githubusercontent.com/helonayala/sysid/main/data/03_random_steps_03.mat",
-    },
-    "random_steps_04": {
-        "filename": "03_random_steps_04.mat",
-        "url": "https://raw.githubusercontent.com/helonayala/sysid/main/data/03_random_steps_04.mat",
-    },
-    "swept_sine": {
-        "filename": "04_swept_sine.mat",
-        "url": "https://raw.githubusercontent.com/helonayala/sysid/main/data/04_swept_sine.mat",
-    },
-    "multisine_05": {
-        "filename": "05_multisine_01.mat",
-        "url": "https://raw.githubusercontent.com/helonayala/sysid/main/data/05_multisine_01.mat",
-    },
-    "multisine_06": {
-        "filename": "06_multisine_02.mat",
-        "url": "https://raw.githubusercontent.com/helonayala/sysid/main/data/06_multisine_02.mat",
-    },
-}
-
-BAB_ALIASES = {
-    "01_rampa_positiva": "rampa_positiva",
-    "02_rampa_negativa": "rampa_negativa",
-    "03_random_steps_01": "random_steps_01",
-    "03_random_steps_02": "random_steps_02",
-    "03_random_steps_03": "random_steps_03",
-    "03_random_steps_04": "random_steps_04",
-    "04_swept_sine": "swept_sine",
-    "05_multisine_01": "multisine_05",
-    "06_multisine_02": "multisine_06",
-}
-
-
-def _resolve_bab_name(name: str) -> str:
-    """Resolve bab_datasets aliases to canonical keys."""
-    if name in BAB_DATASET_REGISTRY:
-        return name
-    return BAB_ALIASES.get(name, name)
+from .registry import (
+    SENSOR_REGISTRY as BAB_DATASET_REGISTRY,
+    SENSOR_ALIASES as BAB_ALIASES,
+    resolve_sensor_name as _resolve_bab_name,
+    ensure_sensor,
+    sensors_dir,
+)
 
 
 def _find_trigger_start(trigger: Optional[np.ndarray]) -> int:
@@ -375,20 +324,7 @@ class Dataset:
             available = ", ".join(cls.list_bab_experiments())
             raise ValueError(f"Unknown dataset '{name}'. Available: {available}")
 
-        entry = BAB_DATASET_REGISTRY[resolved]
-        local_data_dir = data_dir or os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "data")
-        )
-        os.makedirs(local_data_dir, exist_ok=True)
-
-        filepath = os.path.join(local_data_dir, entry["filename"])
-        if not os.path.exists(filepath):
-            try:
-                urlretrieve(entry["url"], filepath)
-            except URLError as exc:
-                raise RuntimeError(
-                    f"Failed to download {entry['filename']} from {entry['url']}"
-                ) from exc
+        filepath = str(ensure_sensor(resolved, data_root=data_dir))
 
         data = scipy.io.loadmat(filepath)
         t = np.asarray(data["time"]).flatten()

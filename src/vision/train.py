@@ -430,6 +430,8 @@ def train_end_to_end(
                         "x0": x_seq[:, 0, :],
                         "x_seq": x_seq.permute(1, 0, 2),
                     }
+                    if "y_seq" in batch:
+                        targets["y_seq"] = batch["y_seq"].to(dev).permute(1, 0, 2)
                     losses = compute_losses(outputs, targets, weights=loss_weights)
                     val_sum += losses["total"].item()
                     val_n += 1
