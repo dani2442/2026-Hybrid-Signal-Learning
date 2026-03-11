@@ -367,3 +367,18 @@ examples/
 | `RuntimeError: CUDA out of memory` | Reduce `batch_size` or `hidden_size` in the model config. |
 | `ImportError: torchcde` | Run `pip install torchcde>=0.2.5`. |
 | Checkpoint fails to load | Ensure the library version matches the one used to save. Use `load_model()` for automatic class resolution. |
+
+
+
+```
+srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_video_pipeline.py \
+  --dataset swept_sine \
+  --mode separate \
+  --keypoint-labels-csv data/labels/swept_sine_true_labels.csv \
+  --epochs 20 \
+  --batch-size 32 \
+  --k-steps 20 \
+  --run-name swept_sine_separate_osa \
+  --frame-height 96 \
+  --frame-width 96
+```

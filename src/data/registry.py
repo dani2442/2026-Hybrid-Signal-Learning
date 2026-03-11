@@ -184,6 +184,9 @@ TRUE_LABEL_REGISTRY: Dict[str, Dict[str, str]] = {
             "UnaugmentedDataSet_bab_bar_2pts_dlc3Feb24/CollectedData_Dani_F.csv"
         ),
     },
+    "multisine_05": {
+        "filename": "multisine_05_true_labels.csv",
+    },
 }
 
 
@@ -304,8 +307,11 @@ def ensure_label(
     entry = registry[dataset_name]
     dest = labels_dir(data_root) / entry["filename"]
     if not dest.exists():
+        url = entry.get("url")
+        if not url:
+            return None
         print(f"Downloading {entry['filename']} …")
-        _download(entry["url"], dest)
+        _download(url, dest)
     return dest
 
 

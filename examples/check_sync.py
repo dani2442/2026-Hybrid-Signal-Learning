@@ -325,7 +325,7 @@ def main() -> None:
         frame_timestamps,
         keypoints_video,
         sample_count=args.frame_samples,
-        out_path=out_dir / "frame_overlay.png",
+        out_path=out_dir / f"{args.dataset}_frame_overlay.png",
         labeled_frame_indices=labeled_frame_indices,
     )
 
@@ -341,7 +341,7 @@ def main() -> None:
         video_theta_aligned=video_theta_aligned,
         theta_sensor_from_video=theta_sensor_from_video,
         alignment_info=alignment_info,
-        out_path=out_dir / "theta_comparison.png",
+        out_path=out_dir / f"{args.dataset}_theta_comparison.png",
     )
 
     # ------------------------------------------------------------------
