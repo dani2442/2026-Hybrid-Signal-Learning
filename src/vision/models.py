@@ -1,9 +1,18 @@
-"""Vision models: encoder, decoder, pose estimator, and end-to-end wrapper.
+"""Vision models: encoder, decoders, pose estimator, and end-to-end wrapper.
 
-Encoder A  — ``EncoderThetaNet``: ResNet-50 backbone → 2-D state regression.
+Encoder A  — ``EncoderThetaNet``: ResNet-50 backbone → θ (position only).
 Encoder B  — ``PoseResNet50``:    ResNet-50 + deconv head → heatmaps → keypoints → θ.
-Decoder    — ``DecoderKeypointsMLP``: state → keypoint coordinates.
-Composite  — ``EncOdeDecModel``:  encoder + ODE dynamics + optional decoder.
+Decoder    — ``DecoderKeypointsMLP``: [θ, θ̇] state → keypoint coordinates.
+Decoder    — ``DecoderFrameDeconv``: [θ, θ̇] state → RGB image (transpose conv).
+Composite  — ``EncOdeDecModel``:  encoder(θ) + finite-diff(θ̇) + ODE dynamics + optional decoder.
+
+Pipeline flow::
+
+    image_t  →  Encoder  →  θ_t
+    image_{t-1}  →  Encoder  →  θ_{t-1}
+    θ̇_t = (θ_t − θ_{t-1}) / dt          (finite differences)
+    [θ_t, θ̇_t]  →  NeuralODE  →  [θ, θ̇] trajectory
+    [θ, θ̇]      →  Decoder   →  image / keypoints
 """
 
 from __future__ import annotations
@@ -17,21 +26,25 @@ from ..models.base import resolve_device
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Encoder A: image → state regression (θ, θ̇)
+#  Encoder A: image → position regression (θ)
 # ═══════════════════════════════════════════════════════════════════════
 
 class EncoderThetaNet(nn.Module):
-    """ResNet-50 backbone with a small MLP head predicting ``[θ, θ̇]``.
+    """ResNet-50 backbone with a small MLP head predicting ``θ`` (position).
+
+    Velocity ``θ̇`` is **not** predicted directly; it is obtained via
+    finite differences of two consecutive encoder outputs in the
+    composite ``EncOdeDecModel``.
 
     Parameters
     ----------
     pretrained:
         Use ImageNet-pretrained backbone weights.
     state_dim:
-        Output dimensionality (default 2 for ``[θ, θ̇]``).
+        Output dimensionality (default 1 for ``θ`` only).
     """
 
-    def __init__(self, pretrained: bool = True, state_dim: int = 2) -> None:
+    def __init__(self, pretrained: bool = True, state_dim: int = 1) -> None:
         super().__init__()
         from torchvision.models import resnet50, ResNet50_Weights
 
@@ -47,7 +60,7 @@ class EncoderThetaNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Map ``(B, 3, H, W)`` images to ``(B, state_dim)`` state vectors."""
+        """Map ``(B, 3, H, W)`` images to ``(B, state_dim)`` position vectors."""
         feat = self.features(x)
         return self.head(feat)
 
@@ -139,27 +152,104 @@ class DecoderKeypointsMLP(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Decoder: state → RGB image
+# ═══════════════════════════════════════════════════════════════════════
+
+class DecoderFrameDeconv(nn.Module):
+    """Transpose-conv decoder mapping state ``[θ, θ̇]`` to RGB frames.
+
+    The decoder expands the state to a low-resolution latent map and upsamples
+    it by four ``×2`` transpose-convolution stages (overall ``×16``).
+    Therefore ``frame_height`` and ``frame_width`` must be divisible by 16.
+    """
+
+    def __init__(
+        self,
+        *,
+        state_dim: int = 2,
+        frame_height: int = 96,
+        frame_width: int = 96,
+        out_channels: int = 3,
+        base_channels: int = 256,
+    ) -> None:
+        super().__init__()
+        if frame_height % 16 != 0 or frame_width % 16 != 0:
+            raise ValueError(
+                "frame_height and frame_width must be divisible by 16 "
+                f"(got {frame_height}x{frame_width})."
+            )
+        if base_channels < 32:
+            raise ValueError("base_channels must be >= 32.")
+
+        self.frame_height = int(frame_height)
+        self.frame_width = int(frame_width)
+        self.base_h = self.frame_height // 16
+        self.base_w = self.frame_width // 16
+        self.base_channels = int(base_channels)
+
+        latent_dim = self.base_channels * self.base_h * self.base_w
+        self.fc = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, latent_dim),
+            nn.ReLU(inplace=True),
+        )
+
+        c0 = self.base_channels
+        c1 = c0 // 2
+        c2 = c1 // 2
+        c3 = c2 // 2
+        self.deconv = nn.Sequential(
+            nn.ConvTranspose2d(c0, c1, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(c1),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(c1, c2, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(c2),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(c2, c3, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(c3),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(c3, out_channels, kernel_size=4, stride=2, padding=1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Map ``(B, state_dim)`` → ``(B, 3, H, W)`` in ``[0, 1]``."""
+        z = self.fc(x)
+        z = z.reshape(x.shape[0], self.base_channels, self.base_h, self.base_w)
+        return self.deconv(z)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  End-to-end wrapper: Encoder → ODE → Decoder
 # ═══════════════════════════════════════════════════════════════════════
 
 class EncOdeDecModel(nn.Module):
-    """Composite model: image → state → ODE rollout → (optional) observation.
+    """Composite model: image → θ → finite-diff θ̇ → ODE rollout → (optional) observation.
 
     This module composes an encoder, an ODE dynamics model (from the main
-    library), and an optional decoder.  It is designed so that gradients
-    flow end-to-end through ``encoder → odeint → decoder``.
+    library), and an optional decoder.  The encoder maps a single image
+    to a scalar position ``θ``.  The velocity ``θ̇`` is obtained from
+    finite differences of two consecutive encoder outputs::
+
+        θ̇₀ = (θ₀ − θ₋₁) / dt
+
+    The resulting ``[θ, θ̇]`` initial state is then integrated by the ODE
+    dynamics and optionally decoded to observations.  Gradients flow
+    end-to-end through ``encoder → finite-diff → odeint → decoder``.
 
     Parameters
     ----------
     encoder:
-        Maps an image tensor to an initial state vector.
+        Maps an image tensor ``(B, 3, H, W)`` to position ``(B, 1)``.
     ode_func:
         A torchsde-compatible dynamics module (must expose ``f``, ``g``,
         and ``u_series`` / ``t_series`` / ``batch_start_times`` attributes).
     decoder:
         Optional module mapping state vectors to observation predictions.
     dt:
-        Integration time step.
+        Integration time step (also used for the finite-difference
+        velocity computation).
     """
 
     def __init__(
@@ -178,8 +268,31 @@ class EncOdeDecModel(nn.Module):
     # ── forward helpers ───────────────────────────────────────────────
 
     def encode(self, y0: torch.Tensor) -> torch.Tensor:
-        """Encode initial image(s) to state ``(B, 2)``."""
+        """Encode a single image to position ``(B, 1)``."""
         return self.encoder(y0)
+
+    def encode_initial_state(
+        self, y0: torch.Tensor, y_prev: torch.Tensor
+    ) -> torch.Tensor:
+        """Encode two consecutive frames and compute initial ``[θ, θ̇]``.
+
+        Parameters
+        ----------
+        y0:
+            Current frame ``(B, 3, H, W)``.
+        y_prev:
+            Previous frame ``(B, 3, H, W)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Initial state ``(B, 2)`` as ``[θ, θ̇]`` where
+            ``θ̇ = (θ₀ − θ₋₁) / dt``.
+        """
+        theta_0 = self.encoder(y0)        # (B, 1)
+        theta_prev = self.encoder(y_prev)  # (B, 1)
+        theta_dot_0 = (theta_0 - theta_prev) / self.dt
+        return torch.cat([theta_0, theta_dot_0], dim=-1)  # (B, 2)
 
     def rollout(
         self,
@@ -205,26 +318,45 @@ class EncOdeDecModel(nn.Module):
         """
         device = x0.device
         t_eval = torch.arange(k_steps, dtype=x0.dtype, device=device) * self.dt
+        # ``u_seq`` can be shared ``(K, 1)`` or per-sample ``(B, K, 1)``.
+        # For per-sample controls we integrate each sample separately so every
+        # batch element sees its own control path.
+        if u_seq.ndim == 2:
+            self.ode_func.u_series = u_seq.to(device)
+            self.ode_func.t_series = t_eval
+            self.ode_func.batch_start_times = None
 
-        # Prepare shared u for the dynamics module
-        if u_seq.ndim == 3:
-            # Use first batch element (all batches share same u in typical setup)
-            u_flat = u_seq[0]
-        else:
-            u_flat = u_seq
+            x = x0
+            trajectory = [x]
+            for step in range(1, k_steps):
+                dx = self.ode_func.f(t_eval[step - 1], x)
+                x = x + dx * self.dt
+                trajectory.append(x)
+            return torch.stack(trajectory, dim=0)
 
-        self.ode_func.u_series = u_flat.to(device)
-        self.ode_func.t_series = t_eval
-        self.ode_func.batch_start_times = None
+        if u_seq.ndim != 3:
+            raise ValueError(f"u_seq must have shape (K, 1) or (B, K, 1); got {tuple(u_seq.shape)}")
 
-        # Euler integration (differentiable, no BM overhead)
-        x = x0
-        trajectory = [x]
-        for step in range(1, k_steps):
-            dx = self.ode_func.f(t_eval[step - 1], x)
-            x = x + dx * self.dt
-            trajectory.append(x)
-        return torch.stack(trajectory, dim=0)  # (K, B, 2)
+        if u_seq.shape[0] != x0.shape[0]:
+            raise ValueError(
+                f"Batch mismatch: x0 has B={x0.shape[0]}, u_seq has B={u_seq.shape[0]}"
+            )
+
+        batch_traj = []
+        for b in range(x0.shape[0]):
+            self.ode_func.u_series = u_seq[b].to(device)
+            self.ode_func.t_series = t_eval
+            self.ode_func.batch_start_times = None
+
+            x = x0[b : b + 1]
+            trajectory_b = [x]
+            for step in range(1, k_steps):
+                dx = self.ode_func.f(t_eval[step - 1], x)
+                x = x + dx * self.dt
+                trajectory_b.append(x)
+            batch_traj.append(torch.stack(trajectory_b, dim=0))  # (K, 1, 2)
+
+        return torch.cat(batch_traj, dim=1)  # (K, B, 2)
 
     def decode(self, x_seq: torch.Tensor) -> torch.Tensor:
         """Decode state sequence to observations.
@@ -237,14 +369,23 @@ class EncOdeDecModel(nn.Module):
         Returns
         -------
         torch.Tensor
-            ``(K, B, out_dim)`` observation predictions.
+            ``(K, B, out_dim)`` for vector decoders, or
+            ``(K, B, C, H, W)`` for image decoders.
         """
         if self.decoder is None:
             raise RuntimeError("No decoder attached to this model.")
         K, B, D = x_seq.shape
         flat = x_seq.reshape(K * B, D)
         y_hat = self.decoder(flat)
-        return y_hat.reshape(K, B, -1)
+        if y_hat.ndim == 2:
+            return y_hat.reshape(K, B, -1)
+        if y_hat.ndim == 4:
+            c, h, w = y_hat.shape[1], y_hat.shape[2], y_hat.shape[3]
+            return y_hat.reshape(K, B, c, h, w)
+        raise RuntimeError(
+            "Decoder output must be rank-2 (vector) or rank-4 (image), "
+            f"got shape {tuple(y_hat.shape)}."
+        )
 
     def forward(
         self,
@@ -252,16 +393,31 @@ class EncOdeDecModel(nn.Module):
         u_seq: torch.Tensor,
         k_steps: int,
         *,
+        y_prev: Optional[torch.Tensor] = None,
         return_states: bool = True,
     ) -> Dict[str, torch.Tensor]:
-        """Full forward: encode → rollout → (optional) decode.
+        """Full forward: encode pair → finite-diff → rollout → (optional) decode.
+
+        Parameters
+        ----------
+        y0:
+            Current frame ``(B, 3, H, W)``.
+        u_seq:
+            Control inputs ``(B, K, 1)`` or ``(K, 1)``.
+        k_steps:
+            Number of ODE integration steps.
+        y_prev:
+            Previous frame ``(B, 3, H, W)`` for finite-difference velocity.
+            If *None*, falls back to using ``y0`` for both (θ̇₀ = 0).
 
         Returns a dict with keys:
-          - ``"x0_hat"``: encoded initial state ``(B, 2)``.
+          - ``"x0_hat"``: initial state ``(B, 2)`` as ``[θ, θ̇]``.
           - ``"x_seq_hat"``: predicted state trajectory ``(K, B, 2)``.
           - ``"y_seq_hat"``: decoded observations ``(K, B, out_dim)`` (if decoder exists).
         """
-        x0_hat = self.encode(y0)
+        if y_prev is None:
+            y_prev = y0
+        x0_hat = self.encode_initial_state(y0, y_prev)
         x_seq_hat = self.rollout(x0_hat, u_seq, k_steps)
         out: Dict[str, torch.Tensor] = {
             "x0_hat": x0_hat,

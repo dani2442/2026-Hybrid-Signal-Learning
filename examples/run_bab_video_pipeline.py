@@ -88,6 +88,28 @@ def _predict_encoder_framewise(encoder, dataset, *, device: str = "auto", batch_
     }
 
 
+def _states_from_sensor(data) -> np.ndarray:
+    theta_dot = data.y_dot if data.y_dot is not None else np.zeros_like(data.y)
+    return np.column_stack([data.y, theta_dot]).astype(float)
+
+
+def _predict_image_decoder(decoder, states: np.ndarray, *, device: str = "auto", batch_size: int = 128) -> np.ndarray:
+    import torch
+    from src.models.base import resolve_device
+
+    dev = resolve_device(device)
+    decoder = decoder.to(dev).eval()
+    x = torch.tensor(states, dtype=torch.float32, device=dev)
+    out = []
+    with torch.no_grad():
+        for start in range(0, len(x), batch_size):
+            pred = decoder(x[start : start + batch_size]).cpu().numpy()  # (B, C, H, W)
+            out.append(pred)
+    pred_chw = np.concatenate(out, axis=0)
+    pred_hwc = np.transpose(pred_chw, (0, 2, 3, 1))
+    return np.clip(pred_hwc, 0.0, 1.0)
+
+
 def _rollout_states(model_or_func, x0, u_seq, k_steps: int, dt: float):
     import torch
 
@@ -175,6 +197,42 @@ def _plot_sensor_to_future_sensor(
     axes[1].grid(True, alpha=0.3)
     axes[1].legend()
 
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
+def _plot_sensor_to_future_sensor_osa_full(
+    out_path: Path,
+    t: np.ndarray,
+    theta_true: np.ndarray,
+    theta_pred: np.ndarray,
+    *,
+    theta_dot_true: Optional[np.ndarray] = None,
+    theta_dot_pred: Optional[np.ndarray] = None,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    axes[0].plot(t, theta_true, label="true theta", linewidth=1.0)
+    axes[0].plot(t, theta_pred, label="pred theta (OSA)", linewidth=1.0, linestyle="--")
+    axes[0].set_ylabel("theta [deg]")
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend()
+
+    if theta_dot_true is not None and theta_dot_pred is not None:
+        axes[1].plot(t, theta_dot_true, label="true theta_dot", linewidth=1.0)
+        axes[1].plot(t, theta_dot_pred, label="pred theta_dot (from OSA theta)", linewidth=1.0, linestyle="--")
+        axes[1].set_ylabel("theta_dot")
+    else:
+        resid = theta_true - theta_pred
+        axes[1].plot(t, resid, label="theta residual (true - pred)", linewidth=1.0)
+        axes[1].set_ylabel("residual")
+    axes[1].set_xlabel("time [s]")
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend()
+
+    fig.suptitle("Sensor -> Future Sensor (NeuralODE, complete OSA run)")
     fig.tight_layout()
     fig.savefig(out_path, dpi=180)
     plt.close(fig)
@@ -270,6 +328,61 @@ def _plot_sensor_to_video_overlay(
     plt.close(fig)
 
 
+def _plot_sensor_to_video_image_errors(
+    out_path: Path,
+    t: np.ndarray,
+    mse_per_frame: np.ndarray,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(t, mse_per_frame, linewidth=0.9)
+    ax.set_title("Sensor -> Video (decoder) reconstruction error over complete run")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("MSE per frame")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
+def _plot_sensor_to_video_image_montage(
+    out_path: Path,
+    t: np.ndarray,
+    frames_true: np.ndarray,
+    frames_pred: np.ndarray,
+    sample_indices: np.ndarray,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    if len(sample_indices) == 0:
+        return
+
+    n = len(sample_indices)
+    fig, axes = plt.subplots(3, n, figsize=(3.2 * n, 8), squeeze=False)
+    for col, i in enumerate(sample_indices):
+        gt = np.clip(frames_true[i], 0.0, 1.0)
+        pd = np.clip(frames_pred[i], 0.0, 1.0)
+        err = np.abs(gt - pd)
+
+        axes[0, col].imshow(gt)
+        axes[0, col].set_title(f"true t={t[i]:.2f}s", fontsize=8)
+        axes[0, col].axis("off")
+
+        axes[1, col].imshow(pd)
+        axes[1, col].set_title("pred", fontsize=8)
+        axes[1, col].axis("off")
+
+        axes[2, col].imshow(err)
+        axes[2, col].set_title("abs error", fontsize=8)
+        axes[2, col].axis("off")
+
+    fig.suptitle("Sensor -> Video (true vs predicted frames, complete run samples)")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
 def _load_ode_func(args):
     from src.models.blackbox_ode import _build_structured
 
@@ -283,6 +396,35 @@ def _load_ode_func(args):
 
     print("No --ode-checkpoint given; creating a fresh StructuredNODE dynamics.")
     return _build_structured(hidden_dim=128)
+
+
+def _train_ode_model_separate(args, data, run_dir: Path):
+    from src.config import BlackboxODE2DConfig
+    from src.models.blackbox_ode import StructuredNODE
+
+    n = len(data)
+    tr, va, te = _split_indices(n)
+
+    ode_cfg = BlackboxODE2DConfig(
+        hidden_dim=args.ode_hidden_dim,
+        dt=(1.0 / data.sampling_rate if data.sampling_rate > 0 else 1.0),
+        k_steps=args.k_steps,
+        epochs=args.ode_epochs if args.ode_epochs is not None else args.epochs,
+        batch_size=args.ode_batch_size if args.ode_batch_size is not None else args.batch_size,
+        learning_rate=args.ode_lr if args.ode_lr is not None else args.lr,
+        device=args.device,
+        seed=args.seed,
+        verbose=True,
+        wandb_project=args.wandb,
+        wandb_run_name=f"ode_{args.dataset}",
+    )
+    model = StructuredNODE(ode_cfg)
+    model.fit(
+        train_data=(np.asarray(data.u)[tr], np.asarray(data.y)[tr]),
+        val_data=(np.asarray(data.u)[va], np.asarray(data.y)[va]) if len(va) > 0 else None,
+    )
+    model.save(run_dir / "ode_model.pt")
+    return model, tr, va, te
 
 
 def _run_encoder_only(args, encoder, data, frames, frame_idx_map, aux, run_dir):
@@ -340,52 +482,54 @@ def _require_keypoints(aux: Dict[str, object]) -> np.ndarray:
 
 
 def _run_decoder_only(args, data, frames, frame_idx_map, aux, run_dir):
-    from src.vision.eval import evaluate_decoder
-    from src.vision.models import DecoderKeypointsMLP
-    from src.vision.train import train_decoder
+    from src.vision.eval import evaluate_image_decoder
+    from src.vision.models import DecoderFrameDeconv
+    from src.vision.train import train_image_decoder
 
-    keypoints = _require_keypoints(aux)
-    states = np.column_stack([
-        data.y,
-        data.y_dot if data.y_dot is not None else np.zeros_like(data.y),
-    ]).astype(float)
-
-    valid = np.all(np.isfinite(keypoints), axis=1)
-    states = states[valid]
-    keypoints = keypoints[valid]
-    t = np.asarray(data.t, dtype=float)[valid]
-    valid_sensor_idx = np.where(valid)[0]
+    states = _states_from_sensor(data)
+    frames_sensor = np.asarray(frames[frame_idx_map], dtype=np.float32) / 255.0
+    t = np.asarray(data.t, dtype=float)
 
     tr, va, te = _split_indices(len(states))
-    decoder = DecoderKeypointsMLP()
-    result = train_decoder(
+    decoder = DecoderFrameDeconv(
+        frame_height=int(frames_sensor.shape[1]),
+        frame_width=int(frames_sensor.shape[2]),
+    )
+    result = train_image_decoder(
         decoder,
         states[tr],
-        keypoints[tr],
+        frames_sensor[tr],
         val_states=states[va],
-        val_keypoints=keypoints[va],
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
+        val_frames=frames_sensor[va],
+        epochs=args.decoder_epochs if args.decoder_epochs is not None else args.epochs,
+        batch_size=args.decoder_batch_size if args.decoder_batch_size is not None else args.batch_size,
+        lr=args.decoder_lr if args.decoder_lr is not None else args.lr,
         device=args.device,
         seed=args.seed,
         wandb_project=args.wandb,
-        wandb_run_name=f"dec_{args.dataset}",
+        wandb_run_name=f"dec_img_{args.dataset}",
         checkpoint_dir=str(run_dir),
     )
-    print(f"Best val loss: {result['best_val_loss']:.6f}")
+    print(f"Decoder best val loss: {result['best_val_loss']:.6f}")
 
-    metrics = evaluate_decoder(decoder, states[te], keypoints[te], device=args.device)
+    metrics = evaluate_image_decoder(decoder, states[te], frames_sensor[te], device=args.device)
     _save_metrics_csv(metrics, run_dir / "metrics_sensor_to_video.csv")
     print("Sensor->video metrics:", metrics)
 
-    pred = _plot_sensor_to_video_coords(
-        run_dir / "plot_sensor_to_video_coords.png",
-        decoder,
-        states[te],
-        keypoints[te],
-        t=t[te],
-        device=args.device,
+    pred = _predict_image_decoder(decoder, states[te], device=args.device)
+    mse_per_frame = np.mean((pred - frames_sensor[te]) ** 2, axis=(1, 2, 3))
+    _plot_sensor_to_video_image_errors(
+        run_dir / "plot_sensor_to_video_error_timeline.png",
+        t[te],
+        mse_per_frame,
+    )
+    sample_sel = _select_evenly_spaced(np.arange(len(te), dtype=int), n=args.plot_count)
+    _plot_sensor_to_video_image_montage(
+        run_dir / "plot_sensor_to_video_frames.png",
+        t[te],
+        frames_sensor[te],
+        pred,
+        sample_sel,
     )
     _save_json(
         {
@@ -395,21 +539,6 @@ def _run_decoder_only(args, data, frames, frame_idx_map, aux, run_dir):
             "prediction_shape": list(pred.shape),
         },
         run_dir / "decoder_summary.json",
-    )
-
-    overlay_sel = _select_evenly_spaced(valid_sensor_idx[te], n=args.plot_count)
-    _plot_sensor_to_video_overlay(
-        run_dir / "plot_sensor_to_video_overlay.png",
-        decoder,
-        np.column_stack([
-            data.y,
-            data.y_dot if data.y_dot is not None else np.zeros_like(data.y),
-        ]).astype(float),
-        _require_keypoints(aux),
-        frames,
-        frame_idx_map,
-        overlay_sel,
-        device=args.device,
     )
 
 
@@ -545,6 +674,147 @@ def _run_ode_dec(args, data, frames, frame_idx_map, aux, run_dir):
     print("Sensor->future sensor metrics:", ode_metrics)
 
 
+def _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir):
+    """Train encoder, ODE, and image decoder separately; then evaluate all."""
+    from src.validation.metrics import Metrics
+    from src.vision.datasets import FrameStateDataset
+    from src.vision.eval import evaluate_encoder_framewise, evaluate_image_decoder
+    from src.vision.models import DecoderFrameDeconv
+    from src.vision.train import train_encoder, train_image_decoder
+
+    # 1) Train encoder (video -> sensor)
+    frame_ds = FrameStateDataset(data, frames, frame_idx_map)
+    enc_train_ds, enc_val_ds, enc_test_ds = frame_ds.split()
+    print(
+        f"Encoder splits: {len(enc_train_ds)} train / "
+        f"{len(enc_val_ds)} val / {len(enc_test_ds)} test"
+    )
+
+    enc_result = train_encoder(
+        encoder,
+        enc_train_ds,
+        enc_val_ds,
+        epochs=args.encoder_epochs if args.encoder_epochs is not None else args.epochs,
+        batch_size=args.encoder_batch_size if args.encoder_batch_size is not None else args.batch_size,
+        lr=args.encoder_lr if args.encoder_lr is not None else args.lr,
+        device=args.device,
+        seed=args.seed,
+        wandb_project=args.wandb,
+        wandb_run_name=f"enc_sep_{args.dataset}",
+        checkpoint_dir=str(run_dir),
+    )
+    print(f"Encoder best val loss: {enc_result['best_val_loss']:.6f}")
+
+    enc_metrics = evaluate_encoder_framewise(encoder, enc_test_ds, device=args.device)
+    _save_metrics_csv(enc_metrics, run_dir / "metrics_video_to_sensor.csv")
+    pred_enc = _predict_encoder_framewise(encoder, enc_test_ds, device=args.device)
+    theta_video = None
+    if "theta_sensor_from_video" in aux:
+        theta_video = np.asarray(aux["theta_sensor_from_video"])[pred_enc["idx"]]
+    _plot_video_to_sensor(
+        run_dir / "plot_video_to_sensor.png",
+        pred_enc["t"],
+        pred_enc["true"][:, 0],
+        pred_enc["pred"][:, 0],
+        theta_video_label=theta_video,
+    )
+
+    # 2) Train ODE separately and evaluate complete OSA run.
+    ode_model, tr, va, te = _train_ode_model_separate(args, data, run_dir)
+    u_test = np.asarray(data.u, dtype=float)[te]
+    y_test = np.asarray(data.y, dtype=float)[te]
+    t_test = np.asarray(data.t, dtype=float)[te]
+    y_pred_osa = np.asarray(ode_model.predict_osa(u_test, y_test), dtype=float)
+
+    n_osa = min(len(y_pred_osa), max(0, len(y_test) - 1))
+    y_true_osa = y_test[1 : 1 + n_osa]
+    y_pred_osa = y_pred_osa[:n_osa]
+    t_osa = t_test[1 : 1 + n_osa]
+
+    dt = 1.0 / data.sampling_rate if data.sampling_rate > 0 else 1.0
+    if data.y_dot is not None:
+        td_true_full = np.asarray(data.y_dot, dtype=float)[te]
+    else:
+        td_true_full = np.gradient(y_test, dt)
+    td_true_osa = td_true_full[1 : 1 + n_osa]
+    td_pred_osa = np.gradient(y_pred_osa, dt) if n_osa > 1 else np.zeros_like(y_pred_osa)
+
+    ode_metrics = {
+        "rmse_theta": Metrics.rmse(y_true_osa, y_pred_osa),
+        "mae_theta": Metrics.mae(y_true_osa, y_pred_osa),
+        "r2_theta": Metrics.r2(y_true_osa, y_pred_osa),
+        "fit_theta": Metrics.fit_percent(y_true_osa, y_pred_osa),
+        "rmse_theta_dot_approx": Metrics.rmse(td_true_osa, td_pred_osa),
+    }
+    _save_metrics_csv(ode_metrics, run_dir / "metrics_sensor_to_future_sensor.csv")
+    _plot_sensor_to_future_sensor_osa_full(
+        run_dir / "plot_sensor_to_future_sensor_osa_full.png",
+        t_osa,
+        y_true_osa,
+        y_pred_osa,
+        theta_dot_true=td_true_osa,
+        theta_dot_pred=td_pred_osa,
+    )
+
+    # 3) Train image decoder separately (sensor state -> frame).
+    states = _states_from_sensor(data)
+    frames_sensor = np.asarray(frames[frame_idx_map], dtype=np.float32) / 255.0
+    t_all = np.asarray(data.t, dtype=float)
+
+    decoder = DecoderFrameDeconv(
+        frame_height=int(frames_sensor.shape[1]),
+        frame_width=int(frames_sensor.shape[2]),
+    )
+    dec_result = train_image_decoder(
+        decoder,
+        states[tr],
+        frames_sensor[tr],
+        val_states=states[va],
+        val_frames=frames_sensor[va],
+        epochs=args.decoder_epochs if args.decoder_epochs is not None else args.epochs,
+        batch_size=args.decoder_batch_size if args.decoder_batch_size is not None else args.batch_size,
+        lr=args.decoder_lr if args.decoder_lr is not None else args.lr,
+        device=args.device,
+        seed=args.seed,
+        wandb_project=args.wandb,
+        wandb_run_name=f"dec_sep_{args.dataset}",
+        checkpoint_dir=str(run_dir),
+    )
+    print(f"Decoder best val loss: {dec_result['best_val_loss']:.6f}")
+
+    dec_metrics = evaluate_image_decoder(decoder, states[te], frames_sensor[te], device=args.device)
+    _save_metrics_csv(dec_metrics, run_dir / "metrics_sensor_to_video.csv")
+    pred_frames = _predict_image_decoder(decoder, states[te], device=args.device)
+    mse_per_frame = np.mean((pred_frames - frames_sensor[te]) ** 2, axis=(1, 2, 3))
+    _plot_sensor_to_video_image_errors(
+        run_dir / "plot_sensor_to_video_error_timeline.png",
+        t_all[te],
+        mse_per_frame,
+    )
+    sample_sel = _select_evenly_spaced(np.arange(len(te), dtype=int), n=args.plot_count)
+    _plot_sensor_to_video_image_montage(
+        run_dir / "plot_sensor_to_video_frames.png",
+        t_all[te],
+        frames_sensor[te],
+        pred_frames,
+        sample_sel,
+    )
+
+    _save_json(
+        {
+            "encoder_best_val_loss": float(enc_result["best_val_loss"]),
+            "ode_train_points": int(len(tr)),
+            "ode_val_points": int(len(va)),
+            "ode_test_points": int(len(te)),
+            "decoder_best_val_loss": float(dec_result["best_val_loss"]),
+        },
+        run_dir / "separate_training_summary.json",
+    )
+    print("Video->sensor metrics:", enc_metrics)
+    print("Sensor->future sensor (complete OSA) metrics:", ode_metrics)
+    print("Sensor->video metrics:", dec_metrics)
+
+
 def main():
     parser = argparse.ArgumentParser(description="BAB video + sensor multimodal training pipeline.")
 
@@ -555,6 +825,8 @@ def main():
     parser.add_argument("--video-map-json", default=None, help="JSON dataset->video override map.")
     parser.add_argument("--resample-factor", type=int, default=50, help="Sensor resample factor.")
     parser.add_argument("--video-fps", type=float, default=30.0, help="Video fps.")
+    parser.add_argument("--frame-height", type=int, default=96, help="Loaded video frame height.")
+    parser.add_argument("--frame-width", type=int, default=96, help="Loaded video frame width.")
     parser.add_argument("--keypoint-labels-csv", default=None, help="CSV with beam_left/beam_right labels.")
     parser.add_argument("--theta-labels-csv", default=None, help="CSV with t_s,theta_deg labels.")
     parser.add_argument("--led-frame", type=int, default=None, help="Manual LED-on frame override.")
@@ -567,7 +839,7 @@ def main():
     parser.add_argument(
         "--mode",
         default="encoder_only",
-        choices=["encoder_only", "decoder_only", "enc_ode", "ode_dec", "enc_ode_dec"],
+        choices=["encoder_only", "decoder_only", "enc_ode", "ode_dec", "enc_ode_dec", "separate"],
         help="Training mode.",
     )
     parser.add_argument(
@@ -583,10 +855,22 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--k-steps", type=int, default=20, help="ODE rollout length.")
     parser.add_argument("--freeze-ode-epochs", type=int, default=0)
+    parser.add_argument("--ode-hidden-dim", type=int, default=128, help="Hidden width for structured ODE.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--plot-count", type=int, default=6, help="Number of frame overlays for sensor->video plot.")
     parser.add_argument("--ode-checkpoint", default=None, help="Path to pretrained ODE checkpoint (.pt).")
+
+    # Optional per-stage overrides for --mode separate
+    parser.add_argument("--encoder-epochs", type=int, default=None)
+    parser.add_argument("--encoder-batch-size", type=int, default=None)
+    parser.add_argument("--encoder-lr", type=float, default=None)
+    parser.add_argument("--ode-epochs", type=int, default=None)
+    parser.add_argument("--ode-batch-size", type=int, default=None)
+    parser.add_argument("--ode-lr", type=float, default=None)
+    parser.add_argument("--decoder-epochs", type=int, default=None)
+    parser.add_argument("--decoder-batch-size", type=int, default=None)
+    parser.add_argument("--decoder-lr", type=float, default=None)
 
     # Output
     parser.add_argument("--output-root", default="results")
@@ -629,6 +913,8 @@ def main():
         video_map=video_map,
         resample_factor=args.resample_factor,
         video_fps=args.video_fps,
+        frame_height=args.frame_height,
+        frame_width=args.frame_width,
         preprocess=True,
         led_frame=args.led_frame,
         use_led_sync=not args.no_led_sync,
@@ -659,6 +945,8 @@ def main():
         _run_enc_ode(args, encoder, data, frames, frame_idx_map, aux, run_dir)
     elif args.mode == "ode_dec":
         _run_ode_dec(args, data, frames, frame_idx_map, aux, run_dir)
+    elif args.mode == "separate":
+        _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir)
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 

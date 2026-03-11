@@ -4,7 +4,8 @@ Three standalone entry-points plus a combined end-to-end loop:
 
 1. ``train_encoder``  — image → state regression (EncoderThetaNet).
 2. ``train_decoder``  — state → keypoints (DecoderKeypointsMLP).
-3. ``train_end_to_end`` — Enc → ODE → (Dec) with multi-loss training.
+3. ``train_image_decoder`` — state → RGB image (transpose-conv decoder).
+4. ``train_end_to_end`` — Enc → ODE → (Dec) with multi-loss training.
 
 The ODE-only sensor training should use the existing
 ``BaseModel.fit()`` / ``_BlackboxODE2D._fit()`` path; this module does
@@ -21,6 +22,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -298,6 +300,118 @@ def train_decoder(
     }
 
 
+def _prepare_frame_tensor(frames: np.ndarray, device) -> torch.Tensor:
+    """Convert frame arrays to ``(N, 3, H, W)`` float tensor in ``[0, 1]``."""
+    arr = np.asarray(frames, dtype=np.float32)
+    if arr.ndim != 4:
+        raise ValueError(f"frames must be 4D, got shape {arr.shape}")
+
+    # Accept HWC or CHW format.
+    if arr.shape[-1] in (1, 3):
+        arr = np.transpose(arr, (0, 3, 1, 2))
+    elif arr.shape[1] not in (1, 3):
+        raise ValueError(
+            "frames must be shaped (N,H,W,C) or (N,C,H,W) with C in {1,3}; "
+            f"got {arr.shape}"
+        )
+
+    if arr.max() > 1.0 or arr.min() < 0.0:
+        arr = np.clip(arr / 255.0, 0.0, 1.0)
+    return torch.tensor(arr, dtype=torch.float32, device=device)
+
+
+def train_image_decoder(
+    model: nn.Module,
+    states: np.ndarray,
+    frames: np.ndarray,
+    *,
+    val_states: Optional[np.ndarray] = None,
+    val_frames: Optional[np.ndarray] = None,
+    epochs: int = 200,
+    batch_size: int = 64,
+    lr: float = 1e-3,
+    device: str = "auto",
+    seed: Optional[int] = None,
+    grad_clip: float = DEFAULT_GRAD_CLIP,
+    wandb_project: Optional[str] = None,
+    wandb_run_name: Optional[str] = None,
+    checkpoint_dir: Optional[str] = None,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """Train a true decoder (state → RGB image) with pixel MSE loss."""
+    _set_seed(seed)
+    dev = resolve_device(device)
+    model = model.to(dev)
+
+    x_train = torch.tensor(np.asarray(states, dtype=np.float32), dtype=torch.float32, device=dev)
+    y_train = _prepare_frame_tensor(frames, dev)
+    n = len(x_train)
+
+    has_val = val_states is not None and val_frames is not None
+    if has_val:
+        x_val = torch.tensor(np.asarray(val_states, dtype=np.float32), dtype=torch.float32, device=dev)
+        y_val = _prepare_frame_tensor(val_frames, dev)
+
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    logger = WandbLogger(project=wandb_project, run_name=wandb_run_name)
+
+    train_losses: list[float] = []
+    val_losses: list[float] = []
+    best_val = float("inf")
+
+    it = range(epochs)
+    if verbose:
+        it = tqdm(it, desc="Image decoder training", unit="epoch")
+
+    for epoch in it:
+        model.train()
+        perm = torch.randperm(n, device=dev)
+        epoch_loss = 0.0
+        n_batches = 0
+        for start in range(0, n, batch_size):
+            idx = perm[start : start + batch_size]
+            optimizer.zero_grad()
+            pred = model(x_train[idx])
+            loss = F.mse_loss(pred, y_train[idx])
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
+            epoch_loss += loss.item()
+            n_batches += 1
+
+        avg_train = epoch_loss / max(n_batches, 1)
+        train_losses.append(avg_train)
+
+        avg_val = float("nan")
+        if has_val:
+            model.eval()
+            with torch.no_grad():
+                pred_val = model(x_val)
+                avg_val = F.mse_loss(pred_val, y_val).item()
+            val_losses.append(avg_val)
+            if avg_val < best_val:
+                best_val = avg_val
+                if checkpoint_dir:
+                    _save_module(model, Path(checkpoint_dir) / "decoder_image_best.pt")
+
+        logger.log_metrics(
+            {"train/loss": avg_train, "val/loss": avg_val, "train/epoch": epoch + 1},
+            step=epoch + 1,
+        )
+        if verbose and hasattr(it, "set_postfix"):
+            it.set_postfix(train=f"{avg_train:.5f}", val=f"{avg_val:.5f}")
+
+    if checkpoint_dir:
+        _save_module(model, Path(checkpoint_dir) / "decoder_image_last.pt")
+
+    logger.finish()
+    return {
+        "train_loss": train_losses,
+        "val_loss": val_losses,
+        "best_val_loss": best_val,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────
 # 3. End-to-end Enc → ODE → (Dec) training
 # ─────────────────────────────────────────────────────────────────────
@@ -385,12 +499,13 @@ def train_end_to_end(
 
         for batch in train_loader:
             y0 = batch["y0"].to(dev)
+            y_prev = batch["y_prev"].to(dev)
             u_seq = batch["u_seq"].to(dev)
             x_seq = batch["x_seq"].to(dev)
             K = x_seq.shape[1]
 
             optimizer.zero_grad()
-            outputs = enc_ode_dec(y0, u_seq, K)
+            outputs = enc_ode_dec(y0, u_seq, K, y_prev=y_prev)
 
             # Build targets dict
             targets: Dict[str, torch.Tensor] = {
@@ -422,10 +537,11 @@ def train_end_to_end(
             with torch.no_grad():
                 for batch in val_loader:
                     y0 = batch["y0"].to(dev)
+                    y_prev = batch["y_prev"].to(dev)
                     u_seq = batch["u_seq"].to(dev)
                     x_seq = batch["x_seq"].to(dev)
                     K = x_seq.shape[1]
-                    outputs = enc_ode_dec(y0, u_seq, K)
+                    outputs = enc_ode_dec(y0, u_seq, K, y_prev=y_prev)
                     targets = {
                         "x0": x_seq[:, 0, :],
                         "x_seq": x_seq.permute(1, 0, 2),

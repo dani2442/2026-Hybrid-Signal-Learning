@@ -382,7 +382,12 @@ def load_bab_with_video(
 # ---------------------------------------------------------------------
 
 class FrameStateDataset(TorchDataset):
-    """Per-frame (image, state) dataset for encoder training."""
+    """Per-frame (image, θ) dataset for encoder training.
+
+    The encoder is trained to predict position ``θ`` only; velocity ``θ̇``
+    is obtained from finite differences of consecutive encoder outputs in
+    the composite ``EncOdeDecModel``.
+    """
 
     def __init__(
         self,
@@ -405,8 +410,9 @@ class FrameStateDataset(TorchDataset):
         frame_idx = int(self.frame_index_map[i])
         frame_tensor = torch.from_numpy(normalize_frame(self.frames[frame_idx]))
         theta = float(self.data.y[i])
-        theta_dot = float(self.data.y_dot[i]) if self.data.y_dot is not None else 0.0
-        state = torch.tensor([theta, theta_dot], dtype=torch.float32)
+        # Encoder target is θ only (1-D); velocity comes from finite
+        # differences of two consecutive encoder outputs.
+        state = torch.tensor([theta], dtype=torch.float32)
         meta = {
             "dataset_name": self.data.name,
             "i": i,
@@ -437,9 +443,10 @@ class WindowedSequenceDataset(TorchDataset):
     """Windowed sequence dataset for Enc→ODE and Enc→ODE→Dec training.
 
     Each sample yields:
-      - ``y0`` initial frame(s),
+      - ``y0`` initial frame,
+      - ``y_prev`` previous frame (for finite-difference velocity),
       - ``u_seq`` control sequence ``(K, 1)``,
-      - ``x_seq`` state sequence ``(K, 2)``,
+      - ``x_seq`` state sequence ``(K, 2)`` with ``[θ, θ̇]``,
       - optional ``y_seq`` keypoint sequence ``(K, D)``.
     """
 
@@ -494,6 +501,11 @@ class WindowedSequenceDataset(TorchDataset):
                 window_frames.append(normalize_frame(self.frames[fj]))
             y0 = torch.from_numpy(np.stack(window_frames))
 
+        # Previous frame for finite-difference velocity computation.
+        i_prev = max(0, i - 1)
+        frame_idx_prev = int(self.frame_index_map[i_prev])
+        y_prev = torch.from_numpy(normalize_frame(self.frames[frame_idx_prev]))
+
         u_seq = torch.tensor(self.data.u[i : i + K].reshape(-1, 1), dtype=torch.float32)
 
         theta = self.data.y[i : i + K]
@@ -506,6 +518,7 @@ class WindowedSequenceDataset(TorchDataset):
 
         sample: Dict[str, Any] = {
             "y0": y0,
+            "y_prev": y_prev,
             "u_seq": u_seq,
             "x_seq": x_seq,
             "start_idx": i,
