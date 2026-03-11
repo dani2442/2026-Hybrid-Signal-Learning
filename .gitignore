@@ -6,4 +6,3 @@ wandb/
 uv.lock
 !data/labels/
 results/
-sync_check

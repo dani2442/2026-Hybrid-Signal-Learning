@@ -151,7 +151,9 @@ def _plot_video_to_sensor(
     ax.plot(t, theta_true, label="sensor theta (true)", linewidth=1.0)
     ax.plot(t, theta_pred, label="encoder theta (video->sensor)", linewidth=1.0, linestyle="--")
     if theta_video_label is not None and np.any(np.isfinite(theta_video_label)):
-        ax.plot(t, theta_video_label, label="video theta label (aligned)", linewidth=0.9, alpha=0.75)
+        finite = np.isfinite(theta_video_label)
+        ax.scatter(t[finite], theta_video_label[finite], label="video theta label (aligned)",
+                   marker="x", s=28, linewidths=0.9, alpha=0.8, zorder=3)
     ax.set_title("Video -> Sensor")
     ax.set_xlabel("time [s]")
     ax.set_ylabel("theta [deg]")

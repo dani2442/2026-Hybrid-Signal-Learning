@@ -15,7 +15,7 @@ Usage
     # Explicit video path / different dataset:
     python examples/check_sync.py --dataset swept_sine \
         --video-path /path/to/swept_sine.MOV \
-        --out-dir sync_check/
+        --out-dir results/sync_check/
 """
 
 from __future__ import annotations
@@ -212,7 +212,7 @@ def main() -> None:
                         help="Frame width for loading (default: original res).")
     parser.add_argument("--frame-samples", type=int, default=8,
                         help="Number of sample frames to overlay keypoints on.")
-    parser.add_argument("--out-dir", default="sync_check",
+    parser.add_argument("--out-dir", default="results/sync_check",
                         help="Output directory for diagnostic plots.")
     parser.add_argument("--no-led-sync", action="store_true",
                         help="Disable LED trigger crop of video.")
