@@ -376,7 +376,7 @@ class _BlackboxODE2D(BaseModel):
                 preds.append(pred[-1, 0, :].cpu().numpy())  # full [theta, theta_dot]
         return np.asarray(preds)  # shape (N, 2)
 
-    def predict_free_run(self, u, y_initial):
+    def predict_free_run(self, u, y_initial, *, return_full_state=False):
         import torch
         c = self.config
         u = np.asarray(u, dtype=float).flatten()
@@ -393,6 +393,8 @@ class _BlackboxODE2D(BaseModel):
             x0 = torch.tensor(x0_np, dtype=self._dtype, device=self._device)
             t_grid = torch.arange(len(u), dtype=self._dtype, device=self._device) * c.dt
             pred = self._simulate_deterministic(u_t, x0, t_grid)
+        if return_full_state:
+            return pred[:, 0, :].cpu().numpy()  # (N, 2) — [theta, theta_dot]
         return pred[:, 0, 0].cpu().numpy()
 
     # ── save / load ───────────────────────────────────────────────────

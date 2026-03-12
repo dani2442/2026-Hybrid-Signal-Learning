@@ -372,13 +372,25 @@ examples/
 
 ```
 srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_video_pipeline.py \
-  --dataset swept_sine \
-  --mode separate \
-  --keypoint-labels-csv data/labels/swept_sine_true_labels.csv \
-  --epochs 20 \
-  --batch-size 32 \
-  --k-steps 20 \
-  --run-name swept_sine_separate_osa \
-  --frame-height 96 \
-  --frame-width 96
+    --dataset swept_sine \
+    --mode separate \
+    --keypoint-labels-csv data/labels/swept_sine_true_labels.csv \
+    --epochs 20 --batch-size 32 --k-steps 20 \
+    --ode-training-mode subsequence \
+    --ode-epochs 500 \
+    --run-name swept_sine_separate_windowed \
+    --frame-height 96 --frame-width 96 \
+    --ode-use-encoder-labels
+
+srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_video_pipeline.py \
+    --dataset multisine_05 \
+    --mode separate \
+    --keypoint-labels-csv data/labels/multisine_05_true_labels.csv \
+    --epochs 20 --batch-size 32 --k-steps 20 \
+    --ode-training-mode subsequence \
+    --ode-epochs 500 \
+    --run-name multisine_05_separate_windowed \
+    --frame-height 96 --frame-width 96 \
+    --ode-use-encoder-labels
+
 ```

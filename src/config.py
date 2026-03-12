@@ -188,7 +188,7 @@ class LinearPhysicsConfig(BaseConfig):
     dt: float = 0.05
     solver: str = "euler"
     epochs: int = 1000
-    sequence_length: int = 50
+    sequence_length: int = 20
     training_mode: str = "full"
 
 

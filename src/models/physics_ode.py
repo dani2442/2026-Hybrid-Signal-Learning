@@ -237,7 +237,7 @@ class _PhysODEModel(BaseModel):
                 preds.append(pred[-1, :].cpu().numpy())  # full [theta, theta_dot]
         return np.asarray(preds)  # shape (N, 2)
 
-    def predict_free_run(self, u, y_initial):
+    def predict_free_run(self, u, y_initial, *, return_full_state=False):
         import torch
         u = np.asarray(u, dtype=float).flatten()
         y0 = np.asarray(y_initial, dtype=float).flatten()
@@ -247,6 +247,8 @@ class _PhysODEModel(BaseModel):
             u_t = torch.tensor(u.reshape(-1, 1), dtype=self._dtype, device=self._device)
             x0 = torch.tensor([[y0[0], omega0]], dtype=self._dtype, device=self._device)
             pred = self._simulate(u_t, x0)
+        if return_full_state:
+            return pred.cpu().numpy()  # (N, 2) — [theta, theta_dot]
         return pred[:, 0].cpu().numpy()
 
     # ── save / load hooks ─────────────────────────────────────────────
