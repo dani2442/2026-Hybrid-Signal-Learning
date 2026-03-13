@@ -61,7 +61,15 @@ def _estimate_y_dot(
         except ImportError:
             return np.gradient(y, dt)
 
+        # Guard against severe oversmoothing on low-rate, downsampled data.
+        # Example: w=51 at 30 Hz spans ~1.7 s, which can suppress true dynamics.
         w = max(5, int(savgol_window))
+        max_window_seconds = 0.35
+        max_w_time = int(round(max_window_seconds / dt))
+        if max_w_time >= 5:
+            if max_w_time % 2 == 0:
+                max_w_time += 1
+            w = min(w, max_w_time)
         if w % 2 == 0:
             w += 1
         if w >= len(y):
@@ -186,8 +194,13 @@ class Dataset:
     ) -> "Dataset":
         """Create a Dataset with consistent dt/fs/y_dot handling."""
         dt, fs = _estimate_dt_and_fs(t, default_fs=fallback_fs)
+        y_for_dot = y
+        if y_filt is not None:
+            yf = np.asarray(y_filt, dtype=float).flatten()
+            if len(yf) == len(y) and np.any(np.isfinite(yf)):
+                y_for_dot = yf
         y_dot = _estimate_y_dot(
-            y,
+            y_for_dot,
             dt if dt > 0 else 1.0,
             method=y_dot_method,
             savgol_window=savgol_window,

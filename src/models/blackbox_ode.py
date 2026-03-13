@@ -242,11 +242,21 @@ class _BlackboxODE2D(BaseModel):
     def _compute_velocity(y, dt):
         return np.gradient(y, dt)
 
-    def _simulate(self, u_t, x0, t_grid, batch_start_times=None):
+    def _simulate(
+        self,
+        u_t,
+        x0,
+        t_grid,
+        batch_start_times=None,
+        *,
+        control_t_series=None,
+    ):
         """Integrate dynamics using torchsde (SDE or zero-noise ODE)."""
         import torchsde
         self.func_.u_series = u_t
-        self.func_.t_series = t_grid
+        # ``t_grid`` is the integration output grid. For subsequence training
+        # we still need control lookup against the full absolute timeline.
+        self.func_.t_series = t_grid if control_t_series is None else control_t_series
         self.func_.batch_start_times = batch_start_times
         x0_batch = x0 if x0.ndim == 2 else x0.unsqueeze(0)
         return torchsde.sdeint(
@@ -289,7 +299,57 @@ class _BlackboxODE2D(BaseModel):
 
         factory = _FACTORIES[self._factory_name]
         self.func_ = factory(c.hidden_dim).to(self._device)
-        self.training_loss_ = self._train_shooting(u, y_sim, logger)
+        mode = getattr(c, "training_mode", "subsequence")
+        if mode == "full":
+            self.training_loss_ = self._train_full(u, y_sim, logger)
+        else:
+            self.training_loss_ = self._train_shooting(u, y_sim, logger)
+
+    def _train_full(self, u, y_sim, logger):
+        import torch, torch.optim as optim
+        from tqdm.auto import tqdm
+        c = self.config
+
+        u_t = torch.tensor(u.reshape(-1, 1), dtype=self._dtype, device=self._device)
+        y_t = torch.tensor(y_sim, dtype=self._dtype, device=self._device)
+        t_full = torch.arange(len(y_t), dtype=self._dtype, device=self._device) * c.dt
+
+        params = list(self.func_.parameters())
+        optimizer = optim.Adam(params, lr=c.learning_rate)
+        history = []
+
+        it = range(c.epochs)
+        if c.verbose:
+            it = tqdm(it, desc=f"Training {self.__class__.__name__} (full)", unit="epoch")
+
+        x0 = y_t[0:1]
+        for epoch in it:
+            self.func_.train()
+            optimizer.zero_grad()
+
+            pred = self._simulate(u_t, x0, t_full).squeeze(1)
+            loss = torch.mean((pred - y_t) ** 2)
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                history.append(float("nan"))
+                continue
+
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(params, SHOOTING_GRAD_CLIP)
+            optimizer.step()
+
+            loss_val = loss.item()
+            history.append(loss_val)
+
+            if c.verbose and hasattr(it, "set_postfix"):
+                it.set_postfix(loss=f"{loss_val:.6f}")
+            if logger and c.wandb_log_every > 0 and (epoch + 1) % c.wandb_log_every == 0:
+                logger.log_metrics(
+                    {"train/loss": loss_val, "train/epoch": epoch + 1},
+                    step=epoch + 1,
+                )
+
+        return history
 
     def _train_shooting(self, u, y_sim, logger):
         import torch, torch.optim as optim
@@ -300,7 +360,9 @@ class _BlackboxODE2D(BaseModel):
         y_t = torch.tensor(y_sim, dtype=self._dtype, device=self._device)
         t_full = torch.arange(len(y_t), dtype=self._dtype, device=self._device) * c.dt
 
-        K = min(c.k_steps, len(y_t) - 1)
+        K = min(c.k_steps, len(y_t))
+        if K < 2:
+            return self._train_full(u, y_sim, logger)
         B = c.batch_size
         t_eval = torch.arange(K, dtype=self._dtype, device=self._device) * c.dt
 
@@ -316,12 +378,18 @@ class _BlackboxODE2D(BaseModel):
             self.func_.train()
             optimizer.zero_grad()
 
-            max_start = len(y_t) - K
-            start_idx = np.random.randint(0, max(1, max_start), size=B)
+            max_start = max(1, len(y_t) - K + 1)
+            start_idx = np.random.randint(0, max_start, size=B)
             x0 = y_t[start_idx]
             batch_start_times = t_full[start_idx].reshape(-1, 1)
 
-            pred = self._simulate(u_t, x0, t_eval, batch_start_times)
+            pred = self._simulate(
+                u_t,
+                x0,
+                t_eval,
+                batch_start_times,
+                control_t_series=t_full,
+            )
             targets = torch.stack([y_t[i:i + K] for i in start_idx], dim=1)
             loss = torch.mean((pred - targets) ** 2)
 

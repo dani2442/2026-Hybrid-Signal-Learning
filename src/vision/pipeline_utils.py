@@ -213,6 +213,8 @@ def train_ode_model_separate(args, data, run_dir: Path, *, y_override=None):
         from src.models.physics_ode import LinearPhysics
 
         ode_cfg = LinearPhysicsConfig(**common_cfg)
+        # Reuse --k-steps as subsequence window length for physics ODEs.
+        ode_cfg.sequence_length = max(2, int(args.k_steps))
         if args.ode_training_mode:
             ode_cfg.training_mode = args.ode_training_mode
         model = LinearPhysics(ode_cfg)
@@ -221,6 +223,8 @@ def train_ode_model_separate(args, data, run_dir: Path, *, y_override=None):
         from src.models.physics_ode import StribeckPhysics
 
         ode_cfg = StribeckPhysicsConfig(**common_cfg)
+        # Reuse --k-steps as subsequence window length for physics ODEs.
+        ode_cfg.sequence_length = max(2, int(args.k_steps))
         if args.ode_training_mode:
             ode_cfg.training_mode = args.ode_training_mode
         model = StribeckPhysics(ode_cfg)

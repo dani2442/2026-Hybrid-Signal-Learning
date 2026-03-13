@@ -100,29 +100,42 @@ def plot_sensor_to_future_sensor_freerun_full(
     theta_true: np.ndarray,
     theta_pred: np.ndarray,
     *,
+    u: Optional[np.ndarray] = None,
     theta_dot_true: Optional[np.ndarray] = None,
     theta_dot_pred: Optional[np.ndarray] = None,
 ) -> None:
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
-    axes[0].plot(t, theta_true, label="true theta", linewidth=1.0)
-    axes[0].plot(t, theta_pred, label="pred theta (free-run)", linewidth=1.0, linestyle="--")
-    axes[0].set_ylabel("theta [deg]")
-    axes[0].grid(True, alpha=0.3)
-    axes[0].legend()
+    if u is not None:
+        fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
+        axes[0].plot(t, u, label="input u", linewidth=1.0, color="tab:green")
+        axes[0].set_ylabel("u")
+        axes[0].grid(True, alpha=0.3)
+        axes[0].legend()
+        theta_ax = axes[1]
+        lower_ax = axes[2]
+    else:
+        fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+        theta_ax = axes[0]
+        lower_ax = axes[1]
+
+    theta_ax.plot(t, theta_true, label="true theta", linewidth=1.0)
+    theta_ax.plot(t, theta_pred, label="pred theta (free-run)", linewidth=1.0, linestyle="--")
+    theta_ax.set_ylabel("theta [deg]")
+    theta_ax.grid(True, alpha=0.3)
+    theta_ax.legend()
 
     if theta_dot_true is not None and theta_dot_pred is not None:
-        axes[1].plot(t, theta_dot_true, label="true theta_dot", linewidth=1.0)
-        axes[1].plot(t, theta_dot_pred, label="pred theta_dot (free-run)", linewidth=1.0, linestyle="--")
-        axes[1].set_ylabel("theta_dot")
+        lower_ax.plot(t, theta_dot_true, label="true theta_dot", linewidth=1.0)
+        lower_ax.plot(t, theta_dot_pred, label="pred theta_dot (free-run)", linewidth=1.0, linestyle="--")
+        lower_ax.set_ylabel("theta_dot")
     else:
         resid = theta_true - theta_pred
-        axes[1].plot(t, resid, label="theta residual (true - pred)", linewidth=1.0)
-        axes[1].set_ylabel("residual")
-    axes[1].set_xlabel("time [s]")
-    axes[1].grid(True, alpha=0.3)
-    axes[1].legend()
+        lower_ax.plot(t, resid, label="theta residual (true - pred)", linewidth=1.0)
+        lower_ax.set_ylabel("residual")
+    lower_ax.set_xlabel("time [s]")
+    lower_ax.grid(True, alpha=0.3)
+    lower_ax.legend()
 
     fig.suptitle("Sensor -> Future Sensor (NeuralODE, free-run simulation)")
     fig.tight_layout()

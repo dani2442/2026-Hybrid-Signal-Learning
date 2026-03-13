@@ -262,6 +262,7 @@ class BlackboxODE2DConfig(BaseConfig):
     k_steps: int = 20
     epochs: int = 5000
     batch_size: int = 128
+    training_mode: str = "subsequence"
 
 
 @dataclass
@@ -275,6 +276,7 @@ class BlackboxSDE2DConfig(BaseConfig):
     k_steps: int = 20
     epochs: int = 5000
     batch_size: int = 128
+    training_mode: str = "subsequence"
 
 
 @dataclass
@@ -287,6 +289,7 @@ class BlackboxCDE2DConfig(BaseConfig):
     k_steps: int = 20
     epochs: int = 5000
     batch_size: int = 128
+    training_mode: str = "subsequence"
 
 
 # ─────────────────────────────────────────────────────────────────────

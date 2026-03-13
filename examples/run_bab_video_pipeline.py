@@ -414,6 +414,7 @@ def _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir):
         t_fr_full,
         y_true_fr_full,
         y_pred_fr_full,
+        u=u_all[:n_fr_full],
         theta_dot_true=td_true_full,
         theta_dot_pred=td_pred_full,
     )
@@ -573,6 +574,7 @@ def _run_ode_retrain(args, encoder, data, frames, frame_idx_map, aux, run_dir):
         t_full,
         y_true_full,
         y_pred_full,
+        u=u_all[:n_full],
         theta_dot_true=td_true_full,
         theta_dot_pred=td_pred_full,
     )
