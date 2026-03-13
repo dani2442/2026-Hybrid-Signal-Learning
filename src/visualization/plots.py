@@ -2,18 +2,8 @@
 
 import os
 from typing import Dict, List, Optional, Tuple
+import matplotlib.pyplot as plt
 import numpy as np
-
-try:
-    import matplotlib.pyplot as plt
-except ImportError:
-    plt = None
-
-
-def _check_matplotlib():
-    """Check matplotlib is available."""
-    if plt is None:
-        raise ImportError("matplotlib required. Install with: pip install matplotlib")
 
 
 def _legend_outside(ax, **kwargs):
@@ -58,8 +48,6 @@ def plot_signals(
         figsize: Figure size
         save_path: Path to save the figure (optional)
     """
-    _check_matplotlib()
-
     fig, axes = plt.subplots(2, 1, figsize=figsize, sharex=True)
 
     axes[0].plot(t, u, "b-", linewidth=0.8, label="u")
@@ -97,8 +85,6 @@ def plot_predictions(
         figsize: Figure size
         save_path: Path to save the figure (optional)
     """
-    _check_matplotlib()
-
     plt.figure(figsize=figsize)
     plt.plot(t, y_true, "k-", linewidth=1.0, label="Actual")
 
@@ -137,8 +123,6 @@ def plot_residuals(
         figsize: Figure size
         save_path: Path to save the figure (optional)
     """
-    _check_matplotlib()
-
     plt.figure(figsize=figsize)
 
     colors = plt.cm.tab10.colors
@@ -179,8 +163,6 @@ def plot_spectrograms(
         figsize: Figure size
         save_path: Path to save the figure (optional)
     """
-    _check_matplotlib()
-
     fig, axes = plt.subplots(2, 1, figsize=figsize)
 
     # Output spectrogram
@@ -219,8 +201,6 @@ def plot_model_comparison(
         figsize: Figure size
         save_path: Path to save the figure (optional)
     """
-    _check_matplotlib()
-
     model_names = list(metrics.keys())
     
     if metric_names is None:

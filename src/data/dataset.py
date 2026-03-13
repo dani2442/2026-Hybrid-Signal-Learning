@@ -3,7 +3,6 @@
 import os
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
-from urllib.error import URLError
 from urllib.request import urlretrieve
 
 import numpy as np
@@ -51,42 +50,26 @@ def _estimate_y_dot(
     y = np.asarray(y, dtype=float).flatten()
     if len(y) < 3 or dt <= 0:
         return np.zeros_like(y)
-
     if method == "central":
         return np.gradient(y, dt)
+    if method != "savgol":
+        raise ValueError(f"Unknown y_dot estimation method: {method}")
 
-    if method == "savgol":
-        try:
-            from scipy.signal import savgol_filter
-        except ImportError:
-            return np.gradient(y, dt)
+    from scipy.signal import savgol_filter
 
-        # Guard against severe oversmoothing on low-rate, downsampled data.
-        # Example: w=51 at 30 Hz spans ~1.7 s, which can suppress true dynamics.
-        w = max(5, int(savgol_window))
-        max_window_seconds = 0.35
-        max_w_time = int(round(max_window_seconds / dt))
-        if max_w_time >= 5:
-            if max_w_time % 2 == 0:
-                max_w_time += 1
-            w = min(w, max_w_time)
-        if w % 2 == 0:
-            w += 1
-        if w >= len(y):
-            w = len(y) - 1 if len(y) % 2 == 0 else len(y)
-        if w < 5:
-            return np.gradient(y, dt)
-        poly = min(int(savgol_poly), w - 1)
-        return savgol_filter(
-            y,
-            window_length=w,
-            polyorder=poly,
-            deriv=1,
-            delta=dt,
-            mode="interp",
-        )
-
-    raise ValueError(f"Unknown y_dot estimation method: {method}")
+    max_window = max(5, int(round(0.35 / dt)) | 1)
+    window = max(5, int(savgol_window) | 1)
+    window = min(window, max_window, len(y) - (len(y) + 1) % 2)
+    if window < 5:
+        return np.gradient(y, dt)
+    return savgol_filter(
+        y,
+        window_length=window,
+        polyorder=min(int(savgol_poly), window - 1),
+        deriv=1,
+        delta=dt,
+        mode="interp",
+    )
 
 
 def _slice_optional(arr: Optional[np.ndarray], start: int, end: int) -> Optional[np.ndarray]:
@@ -115,6 +98,15 @@ def _estimate_dt_and_fs(t: np.ndarray, default_fs: float = 1.0) -> tuple[float, 
     dt = np.median(np.diff(t)) if len(t) > 1 else 1.0
     fs = 1.0 / dt if dt > 0 else float(default_fs)
     return float(dt), float(fs)
+
+
+def _mat_array(data: Dict[str, np.ndarray], key: str, fallback: str | None = None) -> Optional[np.ndarray]:
+    values = data.get(key)
+    if values is None and fallback is not None:
+        values = data.get(fallback)
+    if values is None or values.size == 0:
+        return None
+    return np.asarray(values).flatten()
 
 
 @dataclass
@@ -241,39 +233,18 @@ class Dataset:
             trigger_key: Key for trigger signal
             y_filt_key: Key for filtered output
         """
-        try:
-            import scipy.io
-        except ImportError:
-            raise ImportError("scipy required. Install with: pip install scipy")
+        import scipy.io
 
         data = scipy.io.loadmat(filepath)
 
-        t = data[time_key].flatten()
-        u = data[u_key].flatten()
-        y = data[y_key].flatten()
-
-        y_ref = None
-        if y_ref_key in data and data[y_ref_key].size > 0:
-            y_ref = data[y_ref_key].flatten()
-        elif "ref" in data and data["ref"].size > 0:
-            y_ref = data["ref"].flatten()
-
-        trigger = None
-        if trigger_key in data and data[trigger_key].size > 0:
-            trigger = data[trigger_key].flatten()
-
-        y_filt = None
-        if y_filt_key in data and data[y_filt_key].size > 0:
-            y_filt = data[y_filt_key].flatten()
-
         return cls._build_dataset(
-            t=t,
-            u=u,
-            y=y,
+            t=np.asarray(data[time_key]).flatten(),
+            u=np.asarray(data[u_key]).flatten(),
+            y=np.asarray(data[y_key]).flatten(),
             name=os.path.basename(filepath),
-            y_ref=y_ref,
-            y_filt=y_filt,
-            trigger=trigger,
+            y_ref=_mat_array(data, y_ref_key, "ref"),
+            y_filt=_mat_array(data, y_filt_key),
+            trigger=_mat_array(data, trigger_key),
             y_dot_method="savgol",
         )
 
@@ -327,10 +298,7 @@ class Dataset:
             savgol_poly: Savitzky-Golay polynomial order
             data_dir: Local directory containing dataset files
         """
-        try:
-            import scipy.io
-        except ImportError:
-            raise ImportError("scipy required. Install with: pip install scipy")
+        import scipy.io
 
         resolved = _resolve_bab_name(name)
         if resolved not in BAB_DATASET_REGISTRY:
@@ -343,9 +311,9 @@ class Dataset:
         t = np.asarray(data["time"]).flatten()
         u = np.asarray(data["u"]).flatten()
         y = np.asarray(data["y"]).flatten()
-        trigger = np.asarray(data["trigger"]).flatten() if "trigger" in data else None
-        y_ref = np.asarray(data["ref"]).flatten() if "ref" in data else None
-        y_filt = np.asarray(data["yf"]).flatten() if "yf" in data else None
+        trigger = _mat_array(data, "trigger")
+        y_ref = _mat_array(data, "ref")
+        y_filt = _mat_array(data, "yf")
 
         if not preprocess:
             return cls._build_dataset(
@@ -420,13 +388,9 @@ class Dataset:
             New preprocessed Dataset
         """
         s_idx = start_idx if start_idx is not None else 0
-        if (
-            start_idx is None
-            and trigger_key == "trigger"
-            and self.trigger is not None
-        ):
+        if s_idx == 0 and trigger_key == "trigger" and self.trigger is not None:
             s_idx = _find_trigger_start(self.trigger)
-        e_idx = end_idx if end_idx is not None else len(self.t)
+        e_idx = len(self.t) if end_idx is None else end_idx
 
         t = self.t[s_idx:e_idx]
         u = self.u[s_idx:e_idx]

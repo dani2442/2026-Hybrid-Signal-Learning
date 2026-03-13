@@ -58,8 +58,7 @@ def collate_frame_state(batch):
 
 
 def states_from_sensor(data) -> np.ndarray:
-    theta_dot = data.y_dot if data.y_dot is not None else np.zeros_like(data.y)
-    return np.column_stack([data.y, theta_dot]).astype(float)
+    return np.column_stack([data.y, np.zeros_like(data.y) if data.y_dot is None else data.y_dot]).astype(float)
 
 
 def prepare_ode_initial_segment(
@@ -143,19 +142,36 @@ def predict_image_decoder(
     return np.clip(pred_hwc, 0.0, 1.0)
 
 
-def evaluate_and_plot_encoder(encoder, dataset, aux: dict, run_dir: Path, *, device: str = "auto"):
+def _select_theta_video_labels(aux: dict, indices: np.ndarray) -> np.ndarray | None:
+    for key in ("theta_sensor_from_video_sparse", "theta_sensor_from_video"):
+        values = aux.get(key)
+        if values is not None:
+            return np.asarray(values, dtype=float)[indices]
+    return None
+
+
+def _maybe_array(values, *, dtype=float):
+    return None if values is None else np.asarray(values, dtype=dtype)
+
+
+def evaluate_and_plot_encoder(
+    encoder,
+    dataset,
+    aux: dict,
+    run_dir: Path,
+    *,
+    plot_dataset=None,
+    device: str = "auto",
+):
     from src.vision.eval import evaluate_encoder_framewise
     from src.visualization.pipeline_plots import plot_video_to_sensor
 
     metrics = evaluate_encoder_framewise(encoder, dataset, device=device)
     save_metrics_csv(metrics, run_dir / "metrics_video_to_sensor.csv")
 
-    pred = predict_encoder_framewise(encoder, dataset, device=device)
-    theta_video = None
-    if "theta_sensor_from_video_sparse" in aux:
-        theta_video = np.asarray(aux["theta_sensor_from_video_sparse"])[pred["idx"]]
-    elif "theta_sensor_from_video" in aux:
-        theta_video = np.asarray(aux["theta_sensor_from_video"])[pred["idx"]]
+    plot_source = dataset if plot_dataset is None else plot_dataset
+    pred = predict_encoder_framewise(encoder, plot_source, device=device)
+    theta_video = _select_theta_video_labels(aux, pred["idx"])
 
     plot_video_to_sensor(
         run_dir / "plot_video_to_sensor.png",
@@ -182,6 +198,9 @@ def train_and_evaluate_image_decoder(
     wandb_run_name: str | None,
     run_dir: Path,
     plot_count: int,
+    plot_states: np.ndarray | None = None,
+    plot_frames: np.ndarray | None = None,
+    plot_t: np.ndarray | None = None,
 ) -> dict:
     from src.vision.eval import evaluate_image_decoder
     from src.vision.train import train_image_decoder
@@ -209,19 +228,24 @@ def train_and_evaluate_image_decoder(
     metrics = evaluate_image_decoder(decoder, states[te], frames_sensor[te], device=device)
     save_metrics_csv(metrics, run_dir / "metrics_sensor_to_video.csv")
 
-    pred = predict_image_decoder(decoder, states[te], device=device)
-    mse_per_frame = np.mean((pred - frames_sensor[te]) ** 2, axis=(1, 2, 3))
+    eval_pred = predict_image_decoder(decoder, states[te], device=device)
+
+    plot_states_arr = states if plot_states is None else np.asarray(plot_states, dtype=float)
+    plot_frames_arr = frames_sensor if plot_frames is None else np.asarray(plot_frames, dtype=np.float32)
+    plot_t_arr = t if plot_t is None else np.asarray(plot_t, dtype=float)
+    plot_pred = predict_image_decoder(decoder, plot_states_arr, device=device)
+    mse_per_frame = np.mean((plot_pred - plot_frames_arr) ** 2, axis=(1, 2, 3))
     plot_sensor_to_video_image_errors(
         run_dir / "plot_sensor_to_video_error_timeline.png",
-        t[te],
+        plot_t_arr,
         mse_per_frame,
     )
-    sample_sel = select_evenly_spaced(np.arange(len(te), dtype=int), n=plot_count)
+    sample_sel = select_evenly_spaced(np.arange(len(plot_states_arr), dtype=int), n=plot_count)
     plot_sensor_to_video_image_montage(
         run_dir / "plot_sensor_to_video_frames.png",
-        t[te],
-        frames_sensor[te],
-        pred,
+        plot_t_arr,
+        plot_frames_arr,
+        plot_pred,
         sample_sel,
     )
     save_json(
@@ -229,14 +253,16 @@ def train_and_evaluate_image_decoder(
             "n_train": int(len(tr)),
             "n_val": int(len(va)),
             "n_test": int(len(te)),
-            "prediction_shape": list(pred.shape),
+            "prediction_shape": list(eval_pred.shape),
+            "plot_prediction_shape": list(plot_pred.shape),
         },
         run_dir / "decoder_summary.json",
     )
     return {
         "result": result,
         "metrics": metrics,
-        "predictions": pred,
+        "predictions": eval_pred,
+        "plot_predictions": plot_pred,
         "train_idx": tr,
         "val_idx": va,
         "test_idx": te,
@@ -281,6 +307,31 @@ def _split_rollout_state(full_state_pred: np.ndarray, dt: float) -> tuple[np.nda
     return theta, theta_dot
 
 
+def _free_run_segment(
+    ode_model,
+    u: np.ndarray,
+    theta: np.ndarray,
+    theta_dot: np.ndarray | None,
+    dt: float,
+    *,
+    use_sensor_y_dot: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    theta = np.asarray(theta, dtype=float)
+    theta_dot = _maybe_array(theta_dot)
+    init = prepare_ode_initial_segment(theta, theta_dot if use_sensor_y_dot else None, dt)
+    pred_theta, pred_theta_dot = _split_rollout_state(
+        np.asarray(ode_model.predict_free_run(u, init, return_full_state=True), dtype=float),
+        dt,
+    )
+    n = min(len(theta), len(pred_theta))
+    true_theta_dot = (
+        np.gradient(theta[:n], dt)
+        if theta_dot is None
+        else np.asarray(theta_dot[:n], dtype=float)
+    )
+    return theta[:n], pred_theta[:n], true_theta_dot, pred_theta_dot[:n]
+
+
 def evaluate_and_plot_ode_free_run(
     ode_model,
     data,
@@ -295,65 +346,42 @@ def evaluate_and_plot_ode_free_run(
     dt = 1.0 / data.sampling_rate if data.sampling_rate > 0 else 1.0
     u_all = np.asarray(data.u, dtype=float)
     y_all = np.asarray(data.y, dtype=float)
-    y_dot_all = np.asarray(data.y_dot, dtype=float) if data.y_dot is not None else None
+    y_dot_all = _maybe_array(data.y_dot)
     t_all = np.asarray(data.t, dtype=float)
-
-    y_init_full = prepare_ode_initial_segment(
-        y_all,
-        y_dot_all if use_sensor_y_dot else None,
-        dt,
-    )
-    full_state_pred = np.asarray(
-        ode_model.predict_free_run(u_all, y_init_full, return_full_state=True),
-        dtype=float,
-    )
-    y_pred_full, theta_dot_pred_full = _split_rollout_state(full_state_pred, dt)
-
-    n_full = min(len(y_pred_full), len(y_all))
-    y_true_full = y_all[:n_full]
-    y_pred_full = y_pred_full[:n_full]
-    theta_dot_pred_full = theta_dot_pred_full[:n_full]
-    t_full = t_all[:n_full]
-    theta_dot_true_full = (
-        np.asarray(data.y_dot, dtype=float)[:n_full]
-        if data.y_dot is not None
-        else np.gradient(y_true_full, dt)
-    )
 
     y_test = y_all[test_idx]
     y_dot_test = y_dot_all[test_idx] if y_dot_all is not None else None
-    y_init_test = prepare_ode_initial_segment(
-        y_test,
-        y_dot_test if use_sensor_y_dot else None,
+    y_true_full, y_pred_full, theta_dot_true_full, theta_dot_pred_full = _free_run_segment(
+        ode_model,
+        u_all,
+        y_all,
+        y_dot_all,
         dt,
+        use_sensor_y_dot=use_sensor_y_dot,
     )
-    full_state_test = np.asarray(
-        ode_model.predict_free_run(u_all[test_idx], y_init_test, return_full_state=True),
-        dtype=float,
-    )
-    y_pred_test, theta_dot_pred_test = _split_rollout_state(full_state_test, dt)
-
-    n_test = min(len(y_pred_test), len(y_test))
-    theta_dot_true_test = (
-        np.asarray(data.y_dot, dtype=float)[test_idx][:n_test]
-        if data.y_dot is not None
-        else np.gradient(y_test[:n_test], dt)
+    y_true_test, y_pred_test, theta_dot_true_test, theta_dot_pred_test = _free_run_segment(
+        ode_model,
+        u_all[test_idx],
+        y_test,
+        y_dot_test,
+        dt,
+        use_sensor_y_dot=use_sensor_y_dot,
     )
     metrics = {
-        "rmse_theta": Metrics.rmse(y_test[:n_test], y_pred_test[:n_test]),
-        "mae_theta": Metrics.mae(y_test[:n_test], y_pred_test[:n_test]),
-        "r2_theta": Metrics.r2(y_test[:n_test], y_pred_test[:n_test]),
-        "fit_theta": Metrics.fit_percent(y_test[:n_test], y_pred_test[:n_test]),
-        "rmse_theta_dot": Metrics.rmse(theta_dot_true_test, theta_dot_pred_test[:n_test]),
+        "rmse_theta": Metrics.rmse(y_true_test, y_pred_test),
+        "mae_theta": Metrics.mae(y_true_test, y_pred_test),
+        "r2_theta": Metrics.r2(y_true_test, y_pred_test),
+        "fit_theta": Metrics.fit_percent(y_true_test, y_pred_test),
+        "rmse_theta_dot": Metrics.rmse(theta_dot_true_test, theta_dot_pred_test),
     }
     save_metrics_csv(metrics, run_dir / "metrics_sensor_to_future_sensor.csv")
 
     plot_sensor_to_future_sensor_freerun_full(
         run_dir / "plot_sensor_to_future_sensor_freerun.png",
-        t_full,
+        t_all[: len(y_true_full)],
         y_true_full,
         y_pred_full,
-        u=u_all[:n_full],
+        u=u_all[: len(y_true_full)],
         theta_dot_true=theta_dot_true_full,
         theta_dot_pred=theta_dot_pred_full,
     )
@@ -362,101 +390,99 @@ def evaluate_and_plot_ode_free_run(
 
 # ── ODE loading / training helpers ──────────────────────────────────
 
-def load_ode_func(args):
-    if args.ode_checkpoint:
+def load_ode_func(config):
+    if config.ode_checkpoint:
         from src.models.base import load_model
 
-        model = load_model(args.ode_checkpoint)
+        model = load_model(config.ode_checkpoint)
         if hasattr(model, "func_") and model.func_ is not None:
             return model.func_
         if hasattr(model, "ode_func_") and model.ode_func_ is not None:
             return model.ode_func_
         raise ValueError(
-            f"Checkpoint {args.ode_checkpoint} does not expose 'func_' or 'ode_func_'."
+            f"Checkpoint {config.ode_checkpoint} does not expose 'func_' or 'ode_func_'."
         )
 
-    if args.ode_model == "linear_physics":
-        from src.models.physics_ode import _build_linear_ode
+    from src.models.blackbox_ode import _build_structured
+    from src.models.physics_ode import _build_linear_ode, _build_stribeck_ode
 
-        print("No --ode-checkpoint given; creating a fresh LinearPhysics dynamics.")
-        return _build_linear_ode()
-    if args.ode_model == "stribeck_physics":
-        from src.models.physics_ode import _build_stribeck_ode
-
-        print("No --ode-checkpoint given; creating a fresh StribeckPhysics dynamics.")
-        return _build_stribeck_ode()
-    if args.ode_model == "structured_node":
-        from src.models.blackbox_ode import _build_structured
-
-        print("No --ode-checkpoint given; creating a fresh StructuredNODE dynamics.")
-        return _build_structured(hidden_dim=args.ode_hidden_dim)
-    raise ValueError(f"Unsupported --ode-model: {args.ode_model}")
+    builders = {
+        "linear_physics": ("LinearPhysics", _build_linear_ode),
+        "stribeck_physics": ("StribeckPhysics", _build_stribeck_ode),
+        "structured_node": (
+            "StructuredNODE",
+            lambda: _build_structured(hidden_dim=config.ode_hidden_dim),
+        ),
+    }
+    label, builder = builders[config.ode_model]
+    print(f"No --ode-checkpoint given; creating a fresh {label} dynamics.")
+    return builder()
 
 
-def train_ode_model_separate(args, data, run_dir: Path, *, y_override=None):
+def _ode_learning_rate(config) -> float | None:
+    default = None if config.ode_model in ("linear_physics", "stribeck_physics") else config.lr
+    return default if config.ode_lr is None else config.ode_lr
+
+
+def _build_ode_model(config, common_cfg: dict):
+    from src.config import BlackboxODE2DConfig, LinearPhysicsConfig, StribeckPhysicsConfig
+    from src.models.blackbox_ode import StructuredNODE
+    from src.models.physics_ode import LinearPhysics, StribeckPhysics
+
+    ode_lr = _ode_learning_rate(config)
+    training_mode = common_cfg.pop("training_mode_override")
+
+    def _configure(ode_cfg, *, physics: bool):
+        if ode_lr is not None:
+            ode_cfg.learning_rate = float(ode_lr)
+        if physics:
+            ode_cfg.sequence_length = max(2, int(config.k_steps))
+        if training_mode is not None:
+            ode_cfg.training_mode = training_mode
+        return ode_cfg
+
+    return {
+        "linear_physics": lambda: LinearPhysics(
+            _configure(LinearPhysicsConfig(**common_cfg), physics=True)
+        ),
+        "stribeck_physics": lambda: StribeckPhysics(
+            _configure(StribeckPhysicsConfig(**common_cfg), physics=True)
+        ),
+        "structured_node": lambda: StructuredNODE(
+            _configure(
+                BlackboxODE2DConfig(
+                    hidden_dim=config.ode_hidden_dim,
+                    learning_rate=config.lr if ode_lr is None else ode_lr,
+                    k_steps=config.k_steps,
+                    **common_cfg,
+                ),
+                physics=False,
+            )
+        ),
+    }[config.ode_model]()
+
+
+def train_ode_model_separate(config, data, run_dir: Path, *, y_override=None):
     n = len(data)
     tr, va, te = split_indices(n)
     y = y_override if y_override is not None else np.asarray(data.y)
     y_dot = np.asarray(data.y_dot) if data.y_dot is not None else None
 
     dt = 1.0 / data.sampling_rate if data.sampling_rate > 0 else 1.0
-    # Keep ODE LR model-specific by default; only override when explicitly set.
-    default_ode_lr = None if args.ode_model in ("linear_physics", "stribeck_physics") else args.lr
-    ode_lr = getattr(args, "ode_lr", None)
-    if ode_lr is None:
-        ode_lr = default_ode_lr
-
     common_cfg = dict(
         dt=dt,
-        epochs=1000, #previously args.epochs
-        device=args.device,
-        seed=args.seed,
+        epochs=config.epochs_ode,
+        device=config.device,
+        seed=config.seed,
         verbose=True,
-        wandb_project=args.wandb,
-        wandb_run_name=f"ode_{args.dataset}",
+        wandb_project=config.wandb_project,
+        wandb_run_name=f"ode_{config.dataset}",
+        training_mode_override=config.ode_training_mode,
     )
-    if getattr(args, "ode_batch_size", None) is not None:
-        common_cfg["batch_size"] = args.ode_batch_size
-
-    if args.ode_model == "linear_physics":
-        from src.config import LinearPhysicsConfig
-        from src.models.physics_ode import LinearPhysics
-
-        ode_cfg = LinearPhysicsConfig(**common_cfg)
-        if ode_lr is not None:
-            ode_cfg.learning_rate = float(ode_lr)
-        # Reuse --k-steps as subsequence window length for physics ODEs.
-        ode_cfg.sequence_length = max(2, int(args.k_steps))
-        if args.ode_training_mode:
-            ode_cfg.training_mode = args.ode_training_mode
-        model = LinearPhysics(ode_cfg)
-    elif args.ode_model == "stribeck_physics":
-        from src.config import StribeckPhysicsConfig
-        from src.models.physics_ode import StribeckPhysics
-
-        ode_cfg = StribeckPhysicsConfig(**common_cfg)
-        if ode_lr is not None:
-            ode_cfg.learning_rate = float(ode_lr)
-        # Reuse --k-steps as subsequence window length for physics ODEs.
-        ode_cfg.sequence_length = max(2, int(args.k_steps))
-        if args.ode_training_mode:
-            ode_cfg.training_mode = args.ode_training_mode
-        model = StribeckPhysics(ode_cfg)
-    elif args.ode_model == "structured_node":
-        from src.config import BlackboxODE2DConfig
-        from src.models.blackbox_ode import StructuredNODE
-
-        ode_cfg = BlackboxODE2DConfig(
-            hidden_dim=args.ode_hidden_dim,
-            learning_rate=ode_lr if ode_lr is not None else args.lr,
-            k_steps=args.k_steps,
-            **common_cfg,
-        )
-        if args.ode_training_mode:
-            ode_cfg.training_mode = args.ode_training_mode
-        model = StructuredNODE(ode_cfg)
-    else:
-        raise ValueError(f"Unsupported --ode-model: {args.ode_model}")
+    if config.ode_batch_size is not None:
+        common_cfg["batch_size"] = config.ode_batch_size
+    model = _build_ode_model(config, common_cfg)
+    ode_cfg = model.config
 
     print(
         f"ODE training mode: {ode_cfg.training_mode} | "
@@ -466,8 +492,8 @@ def train_ode_model_separate(args, data, run_dir: Path, *, y_override=None):
     y_fit = y
     y_val = y[va] if len(va) > 0 else None
     if (
-        getattr(args, "ode_init_from_y_dot", False)
-        and args.ode_model in ("linear_physics", "stribeck_physics")
+        config.ode_init_from_y_dot
+        and config.ode_model in ("linear_physics", "stribeck_physics")
         and y_dot is not None
     ):
         y_fit = np.column_stack([np.asarray(y, dtype=float), y_dot]).astype(float)

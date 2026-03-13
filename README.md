@@ -545,33 +545,34 @@ loaded_model, meta = hsl.load_model_checkpoint("model.pt")
 
 
 ```
+Advanced defaults for the video pipeline now live in `src/config.py` under
+`BabVideoPipelineConfig`, so the example CLI only exposes the main run knobs.
+
+For the built-in BAB datasets:
+- label CSVs are auto-resolved from the registry / true-label files,
+- frame size defaults to `96x96`,
+- advanced ODE options such as `ode_training_mode` now live in
+  `BabVideoPipelineConfig` instead of the CLI.
+
 srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_video_pipeline.py \
     --dataset swept_sine \
     --mode separate \
     --ode-model linear_physics \
-    --keypoint-labels-csv data/labels/swept_sine_true_labels.csv \
     --epochs 20 --batch-size 32 --k-steps 20 \
-    --ode-training-mode subsequence \
-    --run-name swept_sine_separate_windowed \
-    --frame-height 96 --frame-width 96
+    --run-name swept_sine_separate_windowed
 
 srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_video_pipeline.py \
     --dataset multisine_05 \
     --mode separate \
-    --keypoint-labels-csv data/labels/multisine_05_true_labels.csv \
     --epochs 20 --batch-size 32 --k-steps 20 \
-    --ode-training-mode subsequence \
-    --run-name multisine_05_separate_windowed \
-    --frame-height 96 --frame-width 96
+    --run-name multisine_05_separate_windowed
 
 .venv/bin/python examples/run_bab_video_pipeline.py \
   --dataset swept_sine \
   --mode ode_retrain \
   --encoder-checkpoint results/swept_sine_separate_windowed_20260312_172115/encoder_best.pt \
   --ode-model linear_physics \
-  --ode-training-mode subsequence \
   --epochs 1000 \
-  --ode-lr 1e-6 \
   --run-name swept_sine_ode_retrain_from_sep_windowed
 
 .venv/bin/python examples/run_bab_video_pipeline.py \
@@ -579,9 +580,7 @@ srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_v
   --mode ode_retrain \
   --encoder-checkpoint results/swept_sine_separate_windowed_20260312_172115/encoder_best.pt \
   --ode-model linear_physics \
-  --ode-training-mode subsequence \
   --epochs 1000 \
-  --ode-lr 1e-4 \
   --k-steps 50 \
   --run-name swept_sine_ode_retrain_linear_k50_uplot
 

@@ -27,17 +27,12 @@ from ..data.registry import (
     resolve_led_frame,
     resolve_video_path as _resolve_video_path_registry,
 )
-from ..data.video import get_video_fps, get_video_resolution, load_video_frames as _load_video_frames_impl
+from ..data.video import get_video_fps, get_video_resolution, load_video_frames
 from .utils import (
     align_and_calibrate_theta,
     build_frame_index_map,
     normalize_frame,
 )
-
-
-# Thin wrapper so existing call-sites continue to work.
-_load_video_frames = _load_video_frames_impl
-
 
 def _resolve_video_path(
     dataset_name: str,
@@ -182,21 +177,13 @@ def load_bab_with_video(
     # The sensor data is at ~1 kHz; to get ~30 Hz we need factor ≈ 33.
     effective_resample_factor = resample_factor
     if auto_match_video_fps and preprocess:
-        # Peek at the raw sensor sampling rate to compute the right factor.
-        try:
-            import scipy.io
+        import scipy.io
 
-            sensor_path = str(
-                _ensure_sensor(dataset_name, data_root=data_dir)
-            )
-            raw_t = scipy.io.loadmat(sensor_path)["time"].flatten()
-            raw_dt = float(np.median(np.diff(raw_t))) if len(raw_t) > 1 else 0.001
-            raw_fs = 1.0 / raw_dt if raw_dt > 0 else 1000.0
-            computed_factor = max(1, round(raw_fs / video_fps))
-            effective_resample_factor = computed_factor
-        except Exception:
-            # If peeking fails, fall back to the user-provided factor
-            effective_resample_factor = resample_factor
+        sensor_path = str(_ensure_sensor(dataset_name, data_root=data_dir))
+        raw_t = scipy.io.loadmat(sensor_path)["time"].flatten()
+        raw_dt = float(np.median(np.diff(raw_t))) if len(raw_t) > 1 else 0.001
+        raw_fs = 1.0 / raw_dt if raw_dt > 0 else 1000.0
+        effective_resample_factor = max(1, round(raw_fs / video_fps))
 
     data = SensorDataset.from_bab_experiment(
         dataset_name,
@@ -211,7 +198,7 @@ def load_bab_with_video(
     # --- Determine original resolution for keypoint scaling --------
     orig_h, orig_w = get_video_resolution(video_path_resolved)
 
-    frames = _load_video_frames(
+    frames = load_video_frames(
         video_path_resolved,
         frame_start=frame_start,
         frame_height=frame_height,

@@ -100,27 +100,6 @@ def normalize_frame(
     return img.transpose(2, 0, 1)  # HWC → CHW
 
 
-def heatmaps_to_keypoints(heatmaps: np.ndarray) -> np.ndarray:
-    """Convert a batch of heatmaps to (x, y) keypoint coordinates via argmax.
-
-    Parameters
-    ----------
-    heatmaps:
-        ``(K, H, W)`` array of *K* heatmaps.
-
-    Returns
-    -------
-    np.ndarray
-        ``(K, 2)`` array of ``(x, y)`` coordinates (column, row).
-    """
-    K, H, W = heatmaps.shape
-    flat = heatmaps.reshape(K, -1)
-    max_idx = flat.argmax(axis=1)
-    y_coords = max_idx // W
-    x_coords = max_idx % W
-    return np.column_stack([x_coords, y_coords]).astype(np.float64)
-
-
 def align_and_calibrate_theta(
     sensor_t: np.ndarray,
     sensor_theta: np.ndarray,
@@ -180,12 +159,8 @@ def align_and_calibrate_theta(
     if calibrate_scale and np.sum(overlap) >= max(3, min_overlap // 4):
         sensor_interp = np.interp(shifted_t[overlap], sensor_t, sensor_theta)
         A = np.column_stack([signed_theta[overlap], np.ones(np.sum(overlap))])
-        try:
-            (alpha, beta), _, _, _ = np.linalg.lstsq(A, sensor_interp, rcond=None)
-            theta_cal = signed_theta * float(alpha) + float(beta)
-        except np.linalg.LinAlgError:
-            alpha, beta = 1.0, 0.0
-            theta_cal = signed_theta
+        (alpha, beta), _, _, _ = np.linalg.lstsq(A, sensor_interp, rcond=None)
+        theta_cal = signed_theta * float(alpha) + float(beta)
 
     sensor_theta_from_video = np.full_like(sensor_theta, np.nan, dtype=float)
     valid = np.isfinite(theta_cal)
@@ -258,10 +233,7 @@ def _search_offset(
     offset_max_s: float,
     min_overlap: int,
 ) -> Tuple[float, float]:
-    try:
-        from scipy.optimize import minimize_scalar
-    except ImportError:
-        minimize_scalar = None
+    from scipy.optimize import minimize_scalar
 
     def _neg_corr(off: float) -> float:
         return -_corr_for_offset(
@@ -283,22 +255,21 @@ def _search_offset(
     best_corr = float(corr_vals[best_grid_idx])
 
     # --- Refine around the best grid point with Brent -------------------
-    if minimize_scalar is not None:
-        half = span / n_grid  # one grid step
-        lo = max(float(offset_min_s), best_off - 3 * half)
-        hi = min(float(offset_max_s), best_off + 3 * half)
-        res = minimize_scalar(
-            _neg_corr,
-            bounds=(lo, hi),
-            method="bounded",
-            options={"xatol": 1e-4},
-        )
-        if res.success:
-            refined_off = float(res.x)
-            refined_corr = -float(res.fun)
-            if refined_corr >= best_corr:
-                best_off = refined_off
-                best_corr = refined_corr
+    half = span / n_grid  # one grid step
+    lo = max(float(offset_min_s), best_off - 3 * half)
+    hi = min(float(offset_max_s), best_off + 3 * half)
+    res = minimize_scalar(
+        _neg_corr,
+        bounds=(lo, hi),
+        method="bounded",
+        options={"xatol": 1e-4},
+    )
+    if res.success:
+        refined_off = float(res.x)
+        refined_corr = -float(res.fun)
+        if refined_corr >= best_corr:
+            best_off = refined_off
+            best_corr = refined_corr
 
     return best_off, best_corr
 

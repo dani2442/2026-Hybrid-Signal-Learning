@@ -113,23 +113,6 @@ def get_video_fps(video_path: str) -> float:
     return 30.0
 
 
-def get_video_info(video_path: str) -> dict:
-    """Return video metadata: ``fps``, ``frame_count``, ``height``, ``width``."""
-    info: dict = {"fps": 30.0, "frame_count": 0, "height": 0, "width": 0}
-    try:
-        import cv2
-
-        cap = cv2.VideoCapture(video_path)
-        info["fps"] = float(cap.get(cv2.CAP_PROP_FPS)) or 30.0
-        info["frame_count"] = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        info["width"] = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        info["height"] = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        cap.release()
-    except ImportError:
-        pass
-    return info
-
-
 def get_video_resolution(video_path: str) -> tuple[int, int]:
     """Return ``(height, width)`` of a video without loading frames.
 

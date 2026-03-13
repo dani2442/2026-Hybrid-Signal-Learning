@@ -5,6 +5,9 @@ from typing import Dict
 import numpy as np
 
 
+_EPS = np.finfo(float).eps
+
+
 @dataclass
 class Metrics:
     """
@@ -36,16 +39,14 @@ class Metrics:
         y_true, y_pred = _align_arrays(y_true, y_pred)
         ss_res = np.sum((y_true - y_pred) ** 2)
         ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-        return float(1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+        return float(1 - ss_res / max(ss_tot, _EPS))
 
     @staticmethod
     def nrmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
         """Normalized RMSE (by range)."""
         y_true, y_pred = _align_arrays(y_true, y_pred)
         y_range = np.max(y_true) - np.min(y_true)
-        if y_range == 0:
-            return 0.0
-        return float(Metrics.rmse(y_true, y_pred) / y_range)
+        return float(Metrics.rmse(y_true, y_pred) / max(y_range, _EPS))
 
     @staticmethod
     def fit_percent(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -58,9 +59,7 @@ class Metrics:
         y_mean = np.mean(y_true)
         norm_err = np.linalg.norm(y_true - y_pred)
         norm_ref = np.linalg.norm(y_true - y_mean)
-        if norm_ref == 0:
-            return 1.0
-        return float(1 - norm_err / norm_ref)
+        return float(1 - norm_err / max(norm_ref, _EPS))
 
     @staticmethod
     def compute_all(

@@ -20,6 +20,17 @@ KEYPOINT_COLUMN_LABELS = ("beam_left_x", "beam_left_y", "beam_right_x", "beam_ri
 SENSOR_STATE_LABELS = ("theta_deg", "theta_dot_deg_s")
 
 
+def _float_or(value: str | None, default: float = np.nan) -> float:
+    try:
+        return float(value if value not in (None, "") else default)
+    except ValueError:
+        return default
+
+
+def _index_of(values: list[str], name: str, *, default: int = -1) -> int:
+    return values.index(name) if name in values else default
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Geometry helpers
 # ─────────────────────────────────────────────────────────────────────
@@ -111,32 +122,20 @@ def _parse_simple_keypoint_csv(
     n = len(rows)
     frame = np.arange(n, dtype=int)
     if "frame" in rows[0]:
-        parsed = []
-        for i, r in enumerate(rows):
-            try:
-                parsed.append(int(float(r.get("frame", i))))
-            except ValueError:
-                parsed.append(i)
-        frame = np.asarray(parsed, dtype=int)
+        frame = np.asarray(
+            [int(_float_or(r.get("frame"), i)) for i, r in enumerate(rows)],
+            dtype=int,
+        )
 
     t_s = frame.astype(float) / float(fps)
     if "t_s" in rows[0]:
-        parsed_t = []
-        for i, r in enumerate(rows):
-            try:
-                parsed_t.append(float(r.get("t_s", i / float(fps))))
-            except ValueError:
-                parsed_t.append(i / float(fps))
-        t_s = np.asarray(parsed_t, dtype=float)
+        t_s = np.asarray(
+            [_float_or(r.get("t_s"), i / float(fps)) for i, r in enumerate(rows)],
+            dtype=float,
+        )
 
     def _col(name: str) -> np.ndarray:
-        vals = []
-        for r in rows:
-            try:
-                vals.append(float(r.get(name, "nan")))
-            except ValueError:
-                vals.append(np.nan)
-        return np.asarray(vals, dtype=float)
+        return np.asarray([_float_or(r.get(name)) for r in rows], dtype=float)
 
     xl = _col("beam_left_x")
     yl = _col("beam_left_y")
@@ -176,35 +175,22 @@ def _parse_dlc_multiheader_csv(
 
     bodyparts = [(c or "").strip().lower() for c in rows[1]]
     coords = [(c or "").strip().lower() for c in rows[2]]
-    col_names: list[str] = []
-    for bp, co in zip(bodyparts, coords):
-        if bp and co:
-            col_names.append(f"{bp}_{co}")
-        else:
-            col_names.append("")
+    col_names = [f"{bp}_{co}" if bp and co else "" for bp, co in zip(bodyparts, coords)]
 
     def _find(name: str) -> int:
-        try:
-            return col_names.index(name)
-        except ValueError as exc:
+        idx = _index_of(col_names, name)
+        if idx < 0:
             raise ValueError(
                 f"Column '{name}' not found in DLC labels CSV."
-            ) from exc
+            )
+        return idx
 
     idx_xl = _find("beam_left_x")
     idx_yl = _find("beam_left_y")
     idx_xr = _find("beam_right_x")
     idx_yr = _find("beam_right_y")
-    idx_ll = (
-        col_names.index("beam_left_likelihood")
-        if "beam_left_likelihood" in col_names
-        else -1
-    )
-    idx_rl = (
-        col_names.index("beam_right_likelihood")
-        if "beam_right_likelihood" in col_names
-        else -1
-    )
+    idx_ll = _index_of(col_names, "beam_left_likelihood")
+    idx_rl = _index_of(col_names, "beam_right_likelihood")
 
     data_rows = rows[3:]
     n = len(data_rows)
@@ -212,12 +198,7 @@ def _parse_dlc_multiheader_csv(
     t_s = frame.astype(float) / float(fps)
 
     def _safe_float(row: list[str], idx: int) -> float:
-        if idx < 0 or idx >= len(row):
-            return np.nan
-        try:
-            return float(row[idx])
-        except ValueError:
-            return np.nan
+        return np.nan if idx < 0 or idx >= len(row) else _float_or(row[idx])
 
     xl = np.asarray([_safe_float(r, idx_xl) for r in data_rows], dtype=float)
     yl = np.asarray([_safe_float(r, idx_yl) for r in data_rows], dtype=float)
@@ -291,29 +272,20 @@ def _parse_dlc_collected_data_csv(
     xr_list: list[float] = []
     yr_list: list[float] = []
 
-    _frame_re = re.compile(r"img(\d+)\.png", re.IGNORECASE)
+    frame_re = re.compile(r"img(\d+)\.png", re.IGNORECASE)
 
     for row in data_rows:
-        # Extract frame number from image filename (column at data_col_start - 1
-        # or search for imgXXXX.png in the first columns)
-        frame_num = -1
-        for cell in row[:data_col_start]:
-            m = _frame_re.search(cell.strip())
-            if m:
-                frame_num = int(m.group(1))
-                break
-        if frame_num < 0:
+        match = next(
+            (m for cell in row[:data_col_start] if (m := frame_re.search(cell.strip()))),
+            None,
+        )
+        if match is None:
             continue
 
         def _sf(idx: int) -> float:
-            if idx >= len(row):
-                return np.nan
-            try:
-                return float(row[idx])
-            except ValueError:
-                return np.nan
+            return np.nan if idx >= len(row) else _float_or(row[idx])
 
-        frames_list.append(frame_num)
+        frames_list.append(int(match.group(1)))
         xl_list.append(_sf(idx_xl))
         yl_list.append(_sf(idx_yl))
         xr_list.append(_sf(idx_xr))
@@ -355,16 +327,8 @@ def load_theta_csv(
     t_vals: list[float] = []
     th_vals: list[float] = []
     for i, r in enumerate(rows):
-        try:
-            t = float(r.get("t_s", i / float(fps)))
-        except ValueError:
-            t = i / float(fps)
-        try:
-            th = float(r.get("theta_deg", "nan"))
-        except ValueError:
-            th = np.nan
-        t_vals.append(t)
-        th_vals.append(th)
+        t_vals.append(_float_or(r.get("t_s"), i / float(fps)))
+        th_vals.append(_float_or(r.get("theta_deg")))
 
     return {
         "t_s": np.asarray(t_vals, dtype=float),

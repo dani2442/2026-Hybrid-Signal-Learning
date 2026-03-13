@@ -12,10 +12,8 @@ sub-directory of the project ``data/`` tree:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Dict, Optional
-from urllib.error import URLError
 from urllib.request import urlretrieve
 
 
@@ -28,19 +26,20 @@ def _project_data_root() -> Path:
     return Path(__file__).resolve().parents[2] / "data"
 
 
+def _data_subdir(name: str, data_root: Optional[str] = None) -> Path:
+    return Path(data_root or _project_data_root()) / name
+
+
 def sensors_dir(data_root: Optional[str] = None) -> Path:
-    root = Path(data_root) if data_root else _project_data_root()
-    return root / "sensors"
+    return _data_subdir("sensors", data_root)
 
 
 def videos_dir(data_root: Optional[str] = None) -> Path:
-    root = Path(data_root) if data_root else _project_data_root()
-    return root / "videos"
+    return _data_subdir("videos", data_root)
 
 
 def labels_dir(data_root: Optional[str] = None) -> Path:
-    root = Path(data_root) if data_root else _project_data_root()
-    return root / "labels"
+    return _data_subdir("labels", data_root)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -210,29 +209,10 @@ TRUE_LABEL_REGISTRY: Dict[str, Dict[str, str]] = {
 # ─────────────────────────────────────────────────────────────────────
 
 def _download(url: str, dest: Path, desc: str = "") -> None:
-    """Download *url* to *dest* with optional tqdm progress."""
+    """Download *url* to *dest*."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    label = desc or dest.name
-
-    try:
-        from tqdm.auto import tqdm  # type: ignore
-
-        pbar = None
-
-        def _hook(b: int, bs: int, tot: int) -> None:
-            nonlocal pbar
-            if pbar is None:
-                pbar = tqdm(total=tot, unit="B", unit_scale=True,
-                            desc=f"Downloading {label}")
-            pbar.update(max(0, b * bs - pbar.n))
-
-        urlretrieve(url, str(dest), reporthook=_hook)
-        if pbar is not None:
-            pbar.close()
-    except ImportError:
-        print(f"Downloading {label} …")
-        urlretrieve(url, str(dest))
-        print("Done.")
+    print(f"Downloading {desc or dest.name}...")
+    urlretrieve(url, str(dest))
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -251,11 +231,7 @@ def resolve_video_name(
     override_map: Optional[Dict[str, str]] = None,
 ) -> str:
     """Map a sensor dataset key to the corresponding video base name."""
-    if override_map and dataset_name in override_map:
-        return override_map[dataset_name]
-    if dataset_name in DATASET_VIDEO_MAP:
-        return DATASET_VIDEO_MAP[dataset_name]
-    return dataset_name
+    return (override_map or {}).get(dataset_name, DATASET_VIDEO_MAP.get(dataset_name, dataset_name))
 
 
 def resolve_led_frame(video_name: str, override: Optional[int] = None) -> int:
@@ -274,13 +250,7 @@ def ensure_sensor(dataset_name: str, *, data_root: Optional[str] = None) -> Path
     entry = SENSOR_REGISTRY[resolved]
     dest = sensors_dir(data_root) / entry["filename"]
     if not dest.exists():
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            _download(entry["url"], dest, desc=entry["filename"])
-        except (URLError, OSError) as exc:
-            raise RuntimeError(
-                f"Failed to download {entry['filename']} from {entry['url']}"
-            ) from exc
+        _download(entry["url"], dest, desc=entry["filename"])
     return dest
 
 
@@ -317,16 +287,15 @@ def ensure_label(
     data_root: Optional[str] = None,
 ) -> Optional[Path]:
     """Return path to a label CSV, downloading if absent. None if unavailable."""
-    if dataset_name not in registry:
+    entry = registry.get(dataset_name)
+    if entry is None:
         return None
-    entry = registry[dataset_name]
     dest = labels_dir(data_root) / entry["filename"]
     if not dest.exists():
         url = entry.get("url")
         if not url:
             return None
-        print(f"Downloading {entry['filename']} …")
-        _download(url, dest)
+        _download(url, dest, desc=entry["filename"])
     return dest
 
 
@@ -350,13 +319,7 @@ def resolve_video_path(
     video_map: Optional[Dict[str, str]] = None,
     data_root: Optional[str] = None,
 ) -> tuple[str, str]:
-    """Resolve final video path and canonical video name.
-
-    Tries, in order:
-    1. Explicit *video_path*.
-    2. Look in *video_dir* for ``<video_name>.*``.
-    3. Auto-download via the registry and store in ``data/videos/``.
-    """
+    """Resolve final video path and canonical video name."""
     video_name = resolve_video_name(dataset_name, override_map=video_map)
 
     if video_path is not None:
@@ -364,15 +327,16 @@ def resolve_video_path(
 
     if video_dir is not None:
         vd = Path(video_dir)
-        for ext in (".mp4", ".avi", ".mkv", ".mov", ".MOV"):
-            candidate = vd / f"{video_name}{ext}"
-            if candidate.exists():
-                return str(candidate), video_name
+        candidate = next(
+            (vd / f"{video_name}{ext}" for ext in (".mp4", ".avi", ".mkv", ".mov", ".MOV") if (vd / f"{video_name}{ext}").exists()),
+            None,
+        )
+        if candidate is not None:
+            return str(candidate), video_name
         raise FileNotFoundError(
             f"No video found for '{video_name}' in {video_dir} "
             "(tried .mp4, .avi, .mkv, .mov, .MOV)"
         )
 
-    # Auto-download
     path = ensure_video(dataset_name, data_root=data_root)
     return str(path), video_name

@@ -15,9 +15,8 @@ class WandbLogger:
         logger.log_metrics({"train/loss": 0.05, "val/loss": 0.06}, step=10)
         logger.finish()
 
-    If ``wandb`` is not installed or *project* is ``None`` the logger
-    silently becomes a no-op so callers never need to guard with
-    ``if logger:``.
+    If *project* is ``None`` the logger becomes a no-op so callers never
+    need to guard with ``if logger:``.
     """
 
     def __init__(
@@ -29,18 +28,14 @@ class WandbLogger:
         self._run = None
         if project is None:
             return
-        try:
-            import wandb
+        import wandb
 
-            self._run = wandb.init(
-                project=project,
-                name=run_name,
-                config=config or {},
-                reinit=True,
-            )
-        except Exception:
-            # wandb import or init failure → degrade gracefully
-            self._run = None
+        self._run = wandb.init(
+            project=project,
+            name=run_name,
+            config=config or {},
+            reinit=True,
+        )
 
     @property
     def active(self) -> bool:

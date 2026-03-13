@@ -124,11 +124,8 @@ class BaseModel(ABC):
             run_name=self.config.wandb_run_name,
             config=self.config.to_dict(),
         )
-
-        try:
-            self._fit(u_train, y_train, val_data=val_data, logger=logger)
-        finally:
-            logger.finish()
+        self._fit(u_train, y_train, val_data=val_data, logger=logger)
+        logger.finish()
 
         self._is_fitted = True
         return self
@@ -170,15 +167,9 @@ class BaseModel(ABC):
         """Unified prediction dispatch."""
         if not self._is_fitted:
             raise RuntimeError("Model not fitted. Call fit() first.")
-        if mode == "OSA":
-            if y is None:
-                raise ValueError("y required for OSA prediction")
-            return self.predict_osa(u, y)
-        if mode == "FR":
-            if y is None:
-                raise ValueError("Initial conditions y required for free-run")
-            return self.predict_free_run(u, y)
-        raise ValueError(f"Unknown mode: {mode}. Use 'OSA' or 'FR'.")
+        if y is None:
+            raise ValueError("y required for prediction")
+        return {"OSA": self.predict_osa, "FR": self.predict_free_run}[mode](u, y)
 
     # ── save / load ───────────────────────────────────────────────────
 

@@ -10,6 +10,11 @@ from dataclasses import dataclass, field, asdict, fields
 from typing import Any, Dict, List, Optional
 
 
+def _known_fields(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+    valid = {f.name for f in fields(cls)}
+    return {k: v for k, v in data.items() if k in valid}
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Base
 # ─────────────────────────────────────────────────────────────────────
@@ -21,7 +26,7 @@ class BaseConfig:
     nu: int = 1
     ny: int = 1
     learning_rate: float = 1e-3
-    epochs: int = 100
+    epochs: int = 400
     batch_size: int = 32
     verbose: bool = True
     device: str = "auto"          # "auto", "cpu", "cuda", "cuda:0", …
@@ -40,8 +45,7 @@ class BaseConfig:
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "BaseConfig":
         """Create config from a dict, ignoring unknown keys."""
-        valid = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in d.items() if k in valid})
+        return cls(**_known_fields(cls, d))
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -191,7 +195,7 @@ class LinearPhysicsConfig(BaseConfig):
     epochs: int = 1000
     batch_size: int = 128
     sequence_length: int = 20
-    training_mode: str = "full"
+    training_mode: str = "subsequence"
 
 
 @dataclass
@@ -202,7 +206,7 @@ class StribeckPhysicsConfig(BaseConfig):
     epochs: int = 1000
     batch_size: int = 128
     sequence_length: int = 50
-    training_mode: str = "full"
+    training_mode: str = "subsequence"
 
 
 @dataclass
@@ -248,7 +252,7 @@ class UDEConfig(BaseConfig):
     solver: str = "euler"
     epochs: int = 1000
     sequence_length: int = 50
-    training_mode: str = "full"
+    training_mode: str = "subsequence"
     activation: str = "selu"
 
 
@@ -338,6 +342,81 @@ class EncOdeDecConfig(BaseConfig):
     frame_width: int = 224
     video_fps: float = 30.0
     resample_factor: int = 50
+
+
+BAB_VIDEO_PIPELINE_MODES = (
+    "encoder_only",
+    "decoder_only",
+    "enc_ode",
+    "ode_dec",
+    "enc_ode_dec",
+    "separate",
+    "ode_retrain",
+)
+
+BAB_VIDEO_ENCODERS = ("theta_regression", "pose_heatmap")
+
+BAB_VIDEO_ODE_MODELS = ("linear_physics", "structured_node", "stribeck_physics")
+
+
+@dataclass
+class BabVideoPipelineConfig:
+    """Default configuration for ``examples/run_bab_video_pipeline.py``.
+
+    The example CLI intentionally exposes only the main knobs. Less common
+    overrides live here so the script stays small and readable.
+    """
+
+    dataset: str = "multisine_05"
+    mode: str = "encoder_only"
+    encoder: str = "theta_regression"
+    epochs: int = 50
+    epochs_ode: int = 500
+    batch_size: int = 32
+    lr: float = 1e-4
+    k_steps: int = 20
+    ode_model: str = "linear_physics"
+    run_name: Optional[str] = None
+    output_root: str = "results"
+    wandb_project: Optional[str] = None
+    encoder_checkpoint: Optional[str] = None
+    video_dir: Optional[str] = None
+    video_path: Optional[str] = None
+    video_map_json: Optional[str] = None
+    resample_factor: int = 50
+    video_fps: float = 30.0
+    auto_match_video_fps: bool = True
+    frame_height: int = 96
+    frame_width: int = 96
+    keypoint_labels_csv: Optional[str] = None
+    theta_labels_csv: Optional[str] = None
+    led_frame: Optional[int] = None
+    use_led_sync: bool = True
+    align_theta: bool = True
+    alignment_offset_min_s: float = -12.0
+    alignment_offset_max_s: float = 12.0
+    freeze_ode_epochs: int = 0
+    ode_hidden_dim: int = 128
+    seed: int = 42
+    device: str = "auto"
+    plot_count: int = 6
+    ode_checkpoint: Optional[str] = None
+    ode_use_encoder_labels: bool = True
+    ode_init_from_y_dot: bool = False
+    ode_training_mode: Optional[str] = None
+    ode_batch_size: Optional[int] = 128
+    ode_lr: Optional[float] = None
+    pretrained: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "BabVideoPipelineConfig":
+        return cls(**_known_fields(cls, d))
+
+    def resolved_run_name(self) -> str:
+        return self.run_name or f"{self.mode}_{self.dataset}"
 
 
 # ─────────────────────────────────────────────────────────────────────
