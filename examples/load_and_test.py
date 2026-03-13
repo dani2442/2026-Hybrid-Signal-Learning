@@ -1,21 +1,18 @@
 #!/usr/bin/env python
 """Load a saved model checkpoint and evaluate on test data.
-
-Usage::
-
-    python examples/load_and_test.py checkpoints/gru_multisine_05.pt
-    python examples/load_and_test.py checkpoints/gru_multisine_05.pt --dataset swept_sine
 """
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 
-from src.models.base import load_model
-from src.data import Dataset
-from src.validation import Metrics
-from src.visualization import plot_predictions
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from examples._shared import print_metric_summary, predict_model, resolve_model_key, save_prediction_plot
 
 
 def main():
@@ -26,13 +23,10 @@ def main():
         default="multisine_05",
         help="BAB experiment key for test data (default: multisine_05)",
     )
-    parser.add_argument(
-        "--split",
-        type=float,
-        default=0.85,
-        help="Train/test split ratio; test = 1-split (default: 0.85)",
-    )
     args = parser.parse_args()
+
+    from src.data import Dataset
+    from src.models.base import load_model
 
     # ── Load model ────────────────────────────────────────────────────
     model = load_model(args.checkpoint)
@@ -42,31 +36,29 @@ def main():
 
     # ── Data ──────────────────────────────────────────────────────────
     ds = Dataset.from_bab_experiment(args.dataset)
-    _, test_ds = ds.split(ratio=args.split)
+    _, test_ds = ds.split(ratio=0.85)
     print(f"\nTest set: {test_ds.name}  ({len(test_ds)} samples)")
 
     # ── Predict ───────────────────────────────────────────────────────
-    y_osa = model.predict(test_ds.u, test_ds.y, mode="OSA")
-    y_fr = model.predict(test_ds.u, test_ds.y, mode="FR")
+    model_key = resolve_model_key(model)
+    y_osa, y_fr = predict_model(model, test_ds, model_key=model_key)
 
     # ── Metrics ───────────────────────────────────────────────────────
     ckpt_name = Path(args.checkpoint).stem
     print("\n── One-Step-Ahead ──")
-    Metrics.summary(test_ds.y, y_osa, name=f"{ckpt_name} (OSA)")
+    print_metric_summary(f"{ckpt_name} (OSA)", test_ds.y, y_osa)
     print("\n── Free-Run ──")
-    Metrics.summary(test_ds.y, y_fr, name=f"{ckpt_name} (FR)")
+    print_metric_summary(f"{ckpt_name} (FR)", test_ds.y, y_fr)
 
     # ── Plot ──────────────────────────────────────────────────────────
-    plot_dir = Path("plots")
-    plot_dir.mkdir(exist_ok=True)
-    plot_predictions(
-        test_ds.t,
-        test_ds.y,
+    plot_path = save_prediction_plot(
+        test_ds,
         {f"{ckpt_name} OSA": y_osa, f"{ckpt_name} FR": y_fr},
         title=f"Loaded model – {ckpt_name}",
-        save_path=str(plot_dir / f"test_{ckpt_name}.png"),
+        plot_dir="plots",
+        filename=f"test_{ckpt_name}.png",
     )
-    print(f"\nPlot saved → plots/test_{ckpt_name}.png")
+    print(f"\nPlot saved → {plot_path}")
 
 
 if __name__ == "__main__":

@@ -548,10 +548,10 @@ loaded_model, meta = hsl.load_model_checkpoint("model.pt")
 srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_video_pipeline.py \
     --dataset swept_sine \
     --mode separate \
+    --ode-model linear_physics \
     --keypoint-labels-csv data/labels/swept_sine_true_labels.csv \
     --epochs 20 --batch-size 32 --k-steps 20 \
     --ode-training-mode subsequence \
-    --ode-epochs 500 \
     --run-name swept_sine_separate_windowed \
     --frame-height 96 --frame-width 96
 
@@ -561,7 +561,6 @@ srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_v
     --keypoint-labels-csv data/labels/multisine_05_true_labels.csv \
     --epochs 20 --batch-size 32 --k-steps 20 \
     --ode-training-mode subsequence \
-    --ode-epochs 500 \
     --run-name multisine_05_separate_windowed \
     --frame-height 96 --frame-width 96
 
@@ -571,7 +570,7 @@ srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_v
   --encoder-checkpoint results/swept_sine_separate_windowed_20260312_172115/encoder_best.pt \
   --ode-model linear_physics \
   --ode-training-mode subsequence \
-  --ode-epochs 1000 \
+  --epochs 1000 \
   --ode-lr 1e-6 \
   --run-name swept_sine_ode_retrain_from_sep_windowed
 
@@ -581,7 +580,7 @@ srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_v
   --encoder-checkpoint results/swept_sine_separate_windowed_20260312_172115/encoder_best.pt \
   --ode-model linear_physics \
   --ode-training-mode subsequence \
-  --ode-epochs 1000 \
+  --epochs 1000 \
   --ode-lr 1e-4 \
   --k-steps 50 \
   --run-name swept_sine_ode_retrain_linear_k50_uplot

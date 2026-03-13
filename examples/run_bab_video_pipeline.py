@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 import numpy as np
 
@@ -18,31 +18,28 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.vision.pipeline_utils import (
+    evaluate_and_plot_encoder,
+    evaluate_and_plot_ode_free_run,
     load_ode_func,
     make_run_dir,
     predict_encoder_framewise,
-    predict_image_decoder,
     save_json,
     save_metrics_csv,
     select_evenly_spaced,
     split_indices,
     states_from_sensor,
+    train_and_evaluate_image_decoder,
     train_ode_model_separate,
 )
 from src.visualization.pipeline_plots import (
     plot_sensor_to_future_sensor,
-    plot_sensor_to_future_sensor_freerun_full,
     plot_sensor_to_video_coords,
-    plot_sensor_to_video_image_errors,
-    plot_sensor_to_video_image_montage,
     plot_sensor_to_video_overlay,
-    plot_video_to_sensor,
 )
 
 
 def _run_encoder_only(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     from src.vision.datasets import FrameStateDataset
-    from src.vision.eval import evaluate_encoder_framewise
     from src.vision.train import train_encoder
 
     ds = FrameStateDataset(data, frames, frame_idx_map)
@@ -64,23 +61,8 @@ def _run_encoder_only(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     )
     print(f"Best val loss: {result['best_val_loss']:.6f}")
 
-    metrics = evaluate_encoder_framewise(encoder, test_ds, device=args.device)
-    save_metrics_csv(metrics, run_dir / "metrics_video_to_sensor.csv")
+    metrics, _ = evaluate_and_plot_encoder(encoder, test_ds, aux, run_dir, device=args.device)
     print("Video->sensor metrics:", metrics)
-
-    pred = predict_encoder_framewise(encoder, test_ds, device=args.device)
-    theta_video = None
-    if "theta_sensor_from_video_sparse" in aux:
-        theta_video = np.asarray(aux["theta_sensor_from_video_sparse"])[pred["idx"]]
-    elif "theta_sensor_from_video" in aux:
-        theta_video = np.asarray(aux["theta_sensor_from_video"])[pred["idx"]]
-    plot_video_to_sensor(
-        run_dir / "plot_video_to_sensor.png",
-        pred["t"],
-        pred["true"][:, 0],
-        pred["pred"][:, 0],
-        theta_video_label=theta_video,
-    )
 
 
 def _require_keypoints(aux: Dict[str, object]) -> np.ndarray:
@@ -96,89 +78,39 @@ def _require_keypoints(aux: Dict[str, object]) -> np.ndarray:
     return arr[:, :4]
 
 
-def _initial_theta_segment_from_theta_dot(
-    theta: np.ndarray, theta_dot: Optional[np.ndarray], dt: float
-) -> np.ndarray:
-    """Build a 2-sample theta segment that encodes the desired initial theta_dot."""
-    theta_arr = np.asarray(theta, dtype=float).reshape(-1)
-    if theta_arr.size == 0:
-        raise ValueError("theta must contain at least one sample.")
-    if theta_dot is None:
-        return theta_arr
-
-    theta_dot_arr = np.asarray(theta_dot, dtype=float).reshape(-1)
-    if theta_dot_arr.size == 0 or not np.isfinite(theta_dot_arr[0]):
-        return theta_arr
-
-    theta0 = float(theta_arr[0])
-    omega0 = float(theta_dot_arr[0])
-    return np.asarray([theta0, theta0 + omega0 * float(dt)], dtype=float)
-
-
 def _run_decoder_only(args, data, frames, frame_idx_map, aux, run_dir):
-    from src.vision.eval import evaluate_image_decoder
     from src.vision.models import DecoderFrameDeconv
-    from src.vision.train import train_image_decoder
 
     states = states_from_sensor(data)
     frames_sensor = np.asarray(frames[frame_idx_map], dtype=np.float32) / 255.0
     t = np.asarray(data.t, dtype=float)
 
-    tr, va, te = split_indices(len(states))
     decoder = DecoderFrameDeconv(
         frame_height=int(frames_sensor.shape[1]),
         frame_width=int(frames_sensor.shape[2]),
     )
-    result = train_image_decoder(
+    decoder_run = train_and_evaluate_image_decoder(
         decoder,
-        states[tr],
-        frames_sensor[tr],
-        val_states=states[va],
-        val_frames=frames_sensor[va],
-        epochs=args.decoder_epochs if args.decoder_epochs is not None else args.epochs,
-        batch_size=args.decoder_batch_size if args.decoder_batch_size is not None else args.batch_size,
-        lr=args.decoder_lr if args.decoder_lr is not None else args.lr,
+        states,
+        frames_sensor,
+        t,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
         device=args.device,
         seed=args.seed,
         wandb_project=args.wandb,
         wandb_run_name=f"dec_img_{args.dataset}",
-        checkpoint_dir=str(run_dir),
+        run_dir=run_dir,
+        plot_count=args.plot_count,
     )
-    print(f"Decoder best val loss: {result['best_val_loss']:.6f}")
-
-    metrics = evaluate_image_decoder(decoder, states[te], frames_sensor[te], device=args.device)
-    save_metrics_csv(metrics, run_dir / "metrics_sensor_to_video.csv")
-    print("Sensor->video metrics:", metrics)
-
-    pred = predict_image_decoder(decoder, states[te], device=args.device)
-    mse_per_frame = np.mean((pred - frames_sensor[te]) ** 2, axis=(1, 2, 3))
-    plot_sensor_to_video_image_errors(
-        run_dir / "plot_sensor_to_video_error_timeline.png",
-        t[te],
-        mse_per_frame,
-    )
-    sample_sel = select_evenly_spaced(np.arange(len(te), dtype=int), n=args.plot_count)
-    plot_sensor_to_video_image_montage(
-        run_dir / "plot_sensor_to_video_frames.png",
-        t[te],
-        frames_sensor[te],
-        pred,
-        sample_sel,
-    )
-    save_json(
-        {
-            "n_train": int(len(tr)),
-            "n_val": int(len(va)),
-            "n_test": int(len(te)),
-            "prediction_shape": list(pred.shape),
-        },
-        run_dir / "decoder_summary.json",
-    )
+    print(f"Decoder best val loss: {decoder_run['result']['best_val_loss']:.6f}")
+    print("Sensor->video metrics:", decoder_run["metrics"])
 
 
 def _run_enc_ode(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     from src.vision.datasets import FrameStateDataset, WindowedSequenceDataset
-    from src.vision.eval import evaluate_decoder, evaluate_encoder_framewise, evaluate_end2end, evaluate_ode_rollout
+    from src.vision.eval import evaluate_decoder, evaluate_end2end, evaluate_ode_rollout
     from src.vision.models import DecoderKeypointsMLP, EncOdeDecModel
     from src.vision.train import train_end_to_end
 
@@ -219,21 +151,7 @@ def _run_enc_ode(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     # 1) video -> sensor
     frame_ds = FrameStateDataset(data, frames, frame_idx_map)
     _, _, frame_test_ds = frame_ds.split()
-    enc_metrics = evaluate_encoder_framewise(encoder, frame_test_ds, device=args.device)
-    save_metrics_csv(enc_metrics, run_dir / "metrics_video_to_sensor.csv")
-    pred_enc = predict_encoder_framewise(encoder, frame_test_ds, device=args.device)
-    theta_video = None
-    if "theta_sensor_from_video_sparse" in aux:
-        theta_video = np.asarray(aux["theta_sensor_from_video_sparse"])[pred_enc["idx"]]
-    elif "theta_sensor_from_video" in aux:
-        theta_video = np.asarray(aux["theta_sensor_from_video"])[pred_enc["idx"]]
-    plot_video_to_sensor(
-        run_dir / "plot_video_to_sensor.png",
-        pred_enc["t"],
-        pred_enc["true"][:, 0],
-        pred_enc["pred"][:, 0],
-        theta_video_label=theta_video,
-    )
+    enc_metrics, _ = evaluate_and_plot_encoder(encoder, frame_test_ds, aux, run_dir, device=args.device)
 
     # 2) sensor -> future sensor (NeuralODE rollout)
     ode_metrics = evaluate_ode_rollout(composite, test_ds, init_from="sensor", device=args.device)
@@ -312,11 +230,9 @@ def _run_ode_dec(args, data, frames, frame_idx_map, aux, run_dir):
 
 def _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     """Train encoder, ODE, and image decoder separately; then evaluate all."""
-    from src.validation.metrics import Metrics
     from src.vision.datasets import FrameStateDataset
-    from src.vision.eval import evaluate_encoder_framewise, evaluate_image_decoder
     from src.vision.models import DecoderFrameDeconv
-    from src.vision.train import train_encoder, train_image_decoder
+    from src.vision.train import train_encoder
 
     # 1) Train encoder (video -> sensor)
     frame_ds = FrameStateDataset(data, frames, frame_idx_map)
@@ -330,9 +246,9 @@ def _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir):
         encoder,
         enc_train_ds,
         enc_val_ds,
-        epochs=args.encoder_epochs if args.encoder_epochs is not None else args.epochs,
-        batch_size=args.encoder_batch_size if args.encoder_batch_size is not None else args.batch_size,
-        lr=args.encoder_lr if args.encoder_lr is not None else args.lr,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
         device=args.device,
         seed=args.seed,
         wandb_project=args.wandb,
@@ -341,22 +257,7 @@ def _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     )
     print(f"Encoder best val loss: {enc_result['best_val_loss']:.6f}")
 
-    enc_metrics = evaluate_encoder_framewise(encoder, enc_test_ds, device=args.device)
-    save_metrics_csv(enc_metrics, run_dir / "metrics_video_to_sensor.csv")
-    pred_enc = predict_encoder_framewise(encoder, enc_test_ds, device=args.device)
-    # Use sparse (non-interpolated) video labels for the plot.
-    theta_video = None
-    if "theta_sensor_from_video_sparse" in aux:
-        theta_video = np.asarray(aux["theta_sensor_from_video_sparse"])[pred_enc["idx"]]
-    elif "theta_sensor_from_video" in aux:
-        theta_video = np.asarray(aux["theta_sensor_from_video"])[pred_enc["idx"]]
-    plot_video_to_sensor(
-        run_dir / "plot_video_to_sensor.png",
-        pred_enc["t"],
-        pred_enc["true"][:, 0],
-        pred_enc["pred"][:, 0],
-        theta_video_label=theta_video,
-    )
+    enc_metrics, _ = evaluate_and_plot_encoder(encoder, enc_test_ds, aux, run_dir, device=args.device)
 
     # 2) Train ODE separately and evaluate free-run simulation.
     #    Optionally use encoder-predicted theta as ODE training targets.
@@ -369,92 +270,18 @@ def _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     else:
         print("Using sensor theta labels for ODE training (ground truth).")
     ode_model, tr, va, te = train_ode_model_separate(args, data, run_dir, y_override=y_override)
-    dt = 1.0 / data.sampling_rate if data.sampling_rate > 0 else 1.0
     if args.ode_init_from_y_dot:
         print("Using sensor y_dot for ODE rollout initial theta_dot.")
     else:
         print("Using finite-difference theta for ODE rollout initial theta_dot.")
-
-    # --- Free-run on the FULL trajectory (t=0 → end) ----------------
-    u_all = np.asarray(data.u, dtype=float)
-    y_all = np.asarray(data.y, dtype=float)
-    y_dot_all = np.asarray(data.y_dot, dtype=float) if data.y_dot is not None else None
-    t_all_ode = np.asarray(data.t, dtype=float)
-    y_init_full = _initial_theta_segment_from_theta_dot(
-        y_all,
-        y_dot_all if args.ode_init_from_y_dot else None,
-        dt,
+    ode_eval = evaluate_and_plot_ode_free_run(
+        ode_model,
+        data,
+        te,
+        run_dir,
+        use_sensor_y_dot=args.ode_init_from_y_dot,
     )
-
-    # Use model's own theta_dot from full-state prediction
-    full_state_pred = np.asarray(
-        ode_model.predict_free_run(u_all, y_init_full, return_full_state=True), dtype=float
-    )
-    if full_state_pred.ndim == 2 and full_state_pred.shape[1] >= 2:
-        y_pred_fr_full = full_state_pred[:, 0]
-        td_pred_full = full_state_pred[:, 1]
-    else:
-        y_pred_fr_full = full_state_pred.flatten()
-        td_pred_full = np.gradient(y_pred_fr_full, dt) if len(y_pred_fr_full) > 1 else np.zeros_like(y_pred_fr_full)
-
-    n_fr_full = min(len(y_pred_fr_full), len(y_all))
-    y_true_fr_full = y_all[:n_fr_full]
-    y_pred_fr_full = y_pred_fr_full[:n_fr_full]
-    td_pred_full = td_pred_full[:n_fr_full]
-    t_fr_full = t_all_ode[:n_fr_full]
-
-    # Use consistent derivative method for ground truth: Savgol from data.y_dot
-    # Convert to deg/s to match model's theta_dot (model state is [theta_deg, theta_dot_deg_per_s])
-    if data.y_dot is not None:
-        td_true_full = np.asarray(data.y_dot, dtype=float)[:n_fr_full]
-    else:
-        td_true_full = np.gradient(y_true_fr_full, dt)
-
-    # Metrics on test portion only (fair evaluation)
-    u_test = u_all[te]
-    y_test = y_all[te]
-    y_dot_test = y_dot_all[te] if y_dot_all is not None else None
-    y_init_test = _initial_theta_segment_from_theta_dot(
-        y_test,
-        y_dot_test if args.ode_init_from_y_dot else None,
-        dt,
-    )
-    full_state_test = np.asarray(
-        ode_model.predict_free_run(u_test, y_init_test, return_full_state=True), dtype=float
-    )
-    if full_state_test.ndim == 2 and full_state_test.shape[1] >= 2:
-        y_pred_fr_test = full_state_test[:, 0]
-        td_pred_te = full_state_test[:, 1]
-    else:
-        y_pred_fr_test = full_state_test.flatten()
-        td_pred_te = np.gradient(y_pred_fr_test, dt) if len(y_pred_fr_test) > 1 else np.zeros_like(y_pred_fr_test)
-
-    n_fr_te = min(len(y_pred_fr_test), len(y_test))
-    if data.y_dot is not None:
-        td_true_te = np.asarray(data.y_dot, dtype=float)[te][:n_fr_te]
-    else:
-        td_true_te = np.gradient(y_test[:n_fr_te], dt)
-    td_pred_te = td_pred_te[:n_fr_te]
-
-    ode_metrics = {
-        "rmse_theta": Metrics.rmse(y_test[:n_fr_te], y_pred_fr_test[:n_fr_te]),
-        "mae_theta": Metrics.mae(y_test[:n_fr_te], y_pred_fr_test[:n_fr_te]),
-        "r2_theta": Metrics.r2(y_test[:n_fr_te], y_pred_fr_test[:n_fr_te]),
-        "fit_theta": Metrics.fit_percent(y_test[:n_fr_te], y_pred_fr_test[:n_fr_te]),
-        "rmse_theta_dot": Metrics.rmse(td_true_te, td_pred_te),
-    }
-    save_metrics_csv(ode_metrics, run_dir / "metrics_sensor_to_future_sensor.csv")
-
-    # Plot uses the FULL trajectory (t=0 → end)
-    plot_sensor_to_future_sensor_freerun_full(
-        run_dir / "plot_sensor_to_future_sensor_freerun.png",
-        t_fr_full,
-        y_true_fr_full,
-        y_pred_fr_full,
-        u=u_all[:n_fr_full],
-        theta_dot_true=td_true_full,
-        theta_dot_pred=td_pred_full,
-    )
+    ode_metrics = ode_eval["metrics"]
 
     # 3) Train image decoder separately (sensor state -> frame).
     states = states_from_sensor(data)
@@ -465,40 +292,23 @@ def _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir):
         frame_height=int(frames_sensor.shape[1]),
         frame_width=int(frames_sensor.shape[2]),
     )
-    dec_result = train_image_decoder(
+    decoder_run = train_and_evaluate_image_decoder(
         decoder,
-        states[tr],
-        frames_sensor[tr],
-        val_states=states[va],
-        val_frames=frames_sensor[va],
-        epochs=args.decoder_epochs if args.decoder_epochs is not None else args.epochs,
-        batch_size=args.decoder_batch_size if args.decoder_batch_size is not None else args.batch_size,
-        lr=args.decoder_lr if args.decoder_lr is not None else args.lr,
+        states,
+        frames_sensor,
+        t_all,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
         device=args.device,
         seed=args.seed,
         wandb_project=args.wandb,
         wandb_run_name=f"dec_sep_{args.dataset}",
-        checkpoint_dir=str(run_dir),
+        run_dir=run_dir,
+        plot_count=args.plot_count,
     )
-    print(f"Decoder best val loss: {dec_result['best_val_loss']:.6f}")
-
-    dec_metrics = evaluate_image_decoder(decoder, states[te], frames_sensor[te], device=args.device)
-    save_metrics_csv(dec_metrics, run_dir / "metrics_sensor_to_video.csv")
-    pred_frames = predict_image_decoder(decoder, states[te], device=args.device)
-    mse_per_frame = np.mean((pred_frames - frames_sensor[te]) ** 2, axis=(1, 2, 3))
-    plot_sensor_to_video_image_errors(
-        run_dir / "plot_sensor_to_video_error_timeline.png",
-        t_all[te],
-        mse_per_frame,
-    )
-    sample_sel = select_evenly_spaced(np.arange(len(te), dtype=int), n=args.plot_count)
-    plot_sensor_to_video_image_montage(
-        run_dir / "plot_sensor_to_video_frames.png",
-        t_all[te],
-        frames_sensor[te],
-        pred_frames,
-        sample_sel,
-    )
+    print(f"Decoder best val loss: {decoder_run['result']['best_val_loss']:.6f}")
+    dec_metrics = decoder_run["metrics"]
 
     save_json(
         {
@@ -506,7 +316,7 @@ def _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir):
             "ode_train_points": int(len(tr)),
             "ode_val_points": int(len(va)),
             "ode_test_points": int(len(te)),
-            "decoder_best_val_loss": float(dec_result["best_val_loss"]),
+            "decoder_best_val_loss": float(decoder_run["result"]["best_val_loss"]),
         },
         run_dir / "separate_training_summary.json",
     )
@@ -518,7 +328,6 @@ def _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir):
 def _run_ode_retrain(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     """Train only the ODE, reusing an already-trained encoder."""
     import torch
-    from src.validation.metrics import Metrics
     from src.vision.datasets import FrameStateDataset
 
     # Load encoder weights from checkpoint
@@ -544,96 +353,18 @@ def _run_ode_retrain(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     ode_model, tr, va, te = train_ode_model_separate(
         args, data, run_dir, y_override=y_override,
     )
-    dt = 1.0 / data.sampling_rate if data.sampling_rate > 0 else 1.0
     if args.ode_init_from_y_dot:
         print("Using sensor y_dot for ODE rollout initial theta_dot.")
     else:
         print("Using finite-difference theta for ODE rollout initial theta_dot.")
-
-    # Free-run on FULL trajectory
-    u_all = np.asarray(data.u, dtype=float)
-    y_all = np.asarray(data.y, dtype=float)
-    y_dot_all = np.asarray(data.y_dot, dtype=float) if data.y_dot is not None else None
-    t_all = np.asarray(data.t, dtype=float)
-    y_init_full = _initial_theta_segment_from_theta_dot(
-        y_all,
-        y_dot_all if args.ode_init_from_y_dot else None,
-        dt,
+    ode_eval = evaluate_and_plot_ode_free_run(
+        ode_model,
+        data,
+        te,
+        run_dir,
+        use_sensor_y_dot=args.ode_init_from_y_dot,
     )
-
-    full_state_pred = np.asarray(
-        ode_model.predict_free_run(u_all, y_init_full, return_full_state=True), dtype=float
-    )
-    if full_state_pred.ndim == 2 and full_state_pred.shape[1] >= 2:
-        y_pred_full = full_state_pred[:, 0]
-        td_pred_full = full_state_pred[:, 1]
-    else:
-        y_pred_full = full_state_pred.flatten()
-        td_pred_full = (
-            np.gradient(y_pred_full, dt)
-            if len(y_pred_full) > 1
-            else np.zeros_like(y_pred_full)
-        )
-
-    n_full = min(len(y_pred_full), len(y_all))
-    y_true_full = y_all[:n_full]
-    y_pred_full = y_pred_full[:n_full]
-    td_pred_full = td_pred_full[:n_full]
-    t_full = t_all[:n_full]
-    td_true_full = (
-        np.asarray(data.y_dot, dtype=float)[:n_full]
-        if data.y_dot is not None
-        else np.gradient(y_true_full, dt)
-    )
-
-    # Metrics on test portion
-    y_test = y_all[te]
-    y_dot_test = y_dot_all[te] if y_dot_all is not None else None
-    y_init_test = _initial_theta_segment_from_theta_dot(
-        y_test,
-        y_dot_test if args.ode_init_from_y_dot else None,
-        dt,
-    )
-    full_state_test = np.asarray(
-        ode_model.predict_free_run(u_all[te], y_init_test, return_full_state=True),
-        dtype=float,
-    )
-    if full_state_test.ndim == 2 and full_state_test.shape[1] >= 2:
-        y_pred_test = full_state_test[:, 0]
-        td_pred_test = full_state_test[:, 1]
-    else:
-        y_pred_test = full_state_test.flatten()
-        td_pred_test = (
-            np.gradient(y_pred_test, dt)
-            if len(y_pred_test) > 1
-            else np.zeros_like(y_pred_test)
-        )
-
-    n_te = min(len(y_pred_test), len(y_all[te]))
-    td_true_te = (
-        np.asarray(data.y_dot, dtype=float)[te][:n_te]
-        if data.y_dot is not None
-        else np.gradient(y_all[te][:n_te], dt)
-    )
-
-    ode_metrics = {
-        "rmse_theta": Metrics.rmse(y_all[te][:n_te], y_pred_test[:n_te]),
-        "mae_theta": Metrics.mae(y_all[te][:n_te], y_pred_test[:n_te]),
-        "r2_theta": Metrics.r2(y_all[te][:n_te], y_pred_test[:n_te]),
-        "fit_theta": Metrics.fit_percent(y_all[te][:n_te], y_pred_test[:n_te]),
-        "rmse_theta_dot": Metrics.rmse(td_true_te, td_pred_test[:n_te]),
-    }
-    save_metrics_csv(ode_metrics, run_dir / "metrics_sensor_to_future_sensor.csv")
-
-    plot_sensor_to_future_sensor_freerun_full(
-        run_dir / "plot_sensor_to_future_sensor_freerun.png",
-        t_full,
-        y_true_full,
-        y_pred_full,
-        u=u_all[:n_full],
-        theta_dot_true=td_true_full,
-        theta_dot_pred=td_pred_full,
-    )
+    ode_metrics = ode_eval["metrics"]
 
     # Print learned parameters if physics model
     if hasattr(ode_model, "ode_func_") and ode_model.ode_func_ is not None:
@@ -720,22 +451,15 @@ def main():
                         help="ODE training strategy: 'full' (entire trajectory) or "
                              "'subsequence' (random windows). Default: model-specific.")
 
-    # Optional per-stage overrides for --mode separate
-    parser.add_argument("--encoder-epochs", type=int, default=None)
-    parser.add_argument("--encoder-batch-size", type=int, default=None)
-    parser.add_argument("--encoder-lr", type=float, default=None)
-    parser.add_argument("--ode-epochs", type=int, default=None)
+    # ODE-specific overrides
     parser.add_argument("--ode-batch-size", type=int, default=128)
     parser.add_argument(
         "--ode-lr",
         type=float,
-        default=None,
+        default=0.01,
         help="ODE learning rate override. Default: model config default "
              "(linear_physics/stribeck_physics: 1e-2).",
     )
-    parser.add_argument("--decoder-epochs", type=int, default=None)
-    parser.add_argument("--decoder-batch-size", type=int, default=None)
-    parser.add_argument("--decoder-lr", type=float, default=None)
 
     # Output
     parser.add_argument("--output-root", default="results")
