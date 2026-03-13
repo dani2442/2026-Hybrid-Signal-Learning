@@ -96,6 +96,25 @@ def _require_keypoints(aux: Dict[str, object]) -> np.ndarray:
     return arr[:, :4]
 
 
+def _initial_theta_segment_from_theta_dot(
+    theta: np.ndarray, theta_dot: Optional[np.ndarray], dt: float
+) -> np.ndarray:
+    """Build a 2-sample theta segment that encodes the desired initial theta_dot."""
+    theta_arr = np.asarray(theta, dtype=float).reshape(-1)
+    if theta_arr.size == 0:
+        raise ValueError("theta must contain at least one sample.")
+    if theta_dot is None:
+        return theta_arr
+
+    theta_dot_arr = np.asarray(theta_dot, dtype=float).reshape(-1)
+    if theta_dot_arr.size == 0 or not np.isfinite(theta_dot_arr[0]):
+        return theta_arr
+
+    theta0 = float(theta_arr[0])
+    omega0 = float(theta_dot_arr[0])
+    return np.asarray([theta0, theta0 + omega0 * float(dt)], dtype=float)
+
+
 def _run_decoder_only(args, data, frames, frame_idx_map, aux, run_dir):
     from src.vision.eval import evaluate_image_decoder
     from src.vision.models import DecoderFrameDeconv
@@ -347,17 +366,29 @@ def _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir):
         y_override = np.asarray(data.y, dtype=float).copy()
         y_override[full_pred["idx"]] = full_pred["pred"][:, 0]
         print(f"Using encoder-predicted theta for ODE training ({len(full_pred['idx'])} samples)")
+    else:
+        print("Using sensor theta labels for ODE training (ground truth).")
     ode_model, tr, va, te = train_ode_model_separate(args, data, run_dir, y_override=y_override)
     dt = 1.0 / data.sampling_rate if data.sampling_rate > 0 else 1.0
+    if args.ode_init_from_y_dot:
+        print("Using sensor y_dot for ODE rollout initial theta_dot.")
+    else:
+        print("Using finite-difference theta for ODE rollout initial theta_dot.")
 
     # --- Free-run on the FULL trajectory (t=0 → end) ----------------
     u_all = np.asarray(data.u, dtype=float)
     y_all = np.asarray(data.y, dtype=float)
+    y_dot_all = np.asarray(data.y_dot, dtype=float) if data.y_dot is not None else None
     t_all_ode = np.asarray(data.t, dtype=float)
+    y_init_full = _initial_theta_segment_from_theta_dot(
+        y_all,
+        y_dot_all if args.ode_init_from_y_dot else None,
+        dt,
+    )
 
     # Use model's own theta_dot from full-state prediction
     full_state_pred = np.asarray(
-        ode_model.predict_free_run(u_all, y_all, return_full_state=True), dtype=float
+        ode_model.predict_free_run(u_all, y_init_full, return_full_state=True), dtype=float
     )
     if full_state_pred.ndim == 2 and full_state_pred.shape[1] >= 2:
         y_pred_fr_full = full_state_pred[:, 0]
@@ -382,8 +413,14 @@ def _run_separate(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     # Metrics on test portion only (fair evaluation)
     u_test = u_all[te]
     y_test = y_all[te]
+    y_dot_test = y_dot_all[te] if y_dot_all is not None else None
+    y_init_test = _initial_theta_segment_from_theta_dot(
+        y_test,
+        y_dot_test if args.ode_init_from_y_dot else None,
+        dt,
+    )
     full_state_test = np.asarray(
-        ode_model.predict_free_run(u_test, y_test, return_full_state=True), dtype=float
+        ode_model.predict_free_run(u_test, y_init_test, return_full_state=True), dtype=float
     )
     if full_state_test.ndim == 2 and full_state_test.shape[1] >= 2:
         y_pred_fr_test = full_state_test[:, 0]
@@ -500,20 +537,32 @@ def _run_ode_retrain(args, encoder, data, frames, frame_idx_map, aux, run_dir):
         y_override[full_pred["idx"]] = full_pred["pred"][:, 0]
         print(f"Using encoder-predicted theta for ODE training "
               f"({len(full_pred['idx'])} samples)")
+    else:
+        print("Using sensor theta labels for ODE training (ground truth).")
 
     # Train ODE
     ode_model, tr, va, te = train_ode_model_separate(
         args, data, run_dir, y_override=y_override,
     )
     dt = 1.0 / data.sampling_rate if data.sampling_rate > 0 else 1.0
+    if args.ode_init_from_y_dot:
+        print("Using sensor y_dot for ODE rollout initial theta_dot.")
+    else:
+        print("Using finite-difference theta for ODE rollout initial theta_dot.")
 
     # Free-run on FULL trajectory
     u_all = np.asarray(data.u, dtype=float)
     y_all = np.asarray(data.y, dtype=float)
+    y_dot_all = np.asarray(data.y_dot, dtype=float) if data.y_dot is not None else None
     t_all = np.asarray(data.t, dtype=float)
+    y_init_full = _initial_theta_segment_from_theta_dot(
+        y_all,
+        y_dot_all if args.ode_init_from_y_dot else None,
+        dt,
+    )
 
     full_state_pred = np.asarray(
-        ode_model.predict_free_run(u_all, y_all, return_full_state=True), dtype=float
+        ode_model.predict_free_run(u_all, y_init_full, return_full_state=True), dtype=float
     )
     if full_state_pred.ndim == 2 and full_state_pred.shape[1] >= 2:
         y_pred_full = full_state_pred[:, 0]
@@ -538,8 +587,15 @@ def _run_ode_retrain(args, encoder, data, frames, frame_idx_map, aux, run_dir):
     )
 
     # Metrics on test portion
+    y_test = y_all[te]
+    y_dot_test = y_dot_all[te] if y_dot_all is not None else None
+    y_init_test = _initial_theta_segment_from_theta_dot(
+        y_test,
+        y_dot_test if args.ode_init_from_y_dot else None,
+        dt,
+    )
     full_state_test = np.asarray(
-        ode_model.predict_free_run(u_all[te], y_all[te], return_full_state=True),
+        ode_model.predict_free_run(u_all[te], y_init_test, return_full_state=True),
         dtype=float,
     )
     if full_state_test.ndim == 2 and full_state_test.shape[1] >= 2:
@@ -602,6 +658,11 @@ def main():
     parser.add_argument("--video-map-json", default=None, help="JSON dataset->video override map.")
     parser.add_argument("--resample-factor", type=int, default=50, help="Sensor resample factor.")
     parser.add_argument("--video-fps", type=float, default=30.0, help="Video fps.")
+    parser.add_argument(
+        "--no-auto-match-video-fps",
+        action="store_true",
+        help="Disable automatic sensor resampling to match video FPS.",
+    )
     parser.add_argument("--frame-height", type=int, default=96, help="Loaded video frame height.")
     parser.add_argument("--frame-width", type=int, default=96, help="Loaded video frame width.")
     parser.add_argument("--keypoint-labels-csv", default=None, help="CSV with beam_left/beam_right labels.")
@@ -646,7 +707,14 @@ def main():
     parser.add_argument("--encoder-checkpoint", default=None,
                         help="Path to trained encoder checkpoint (.pt) for --mode ode_retrain.")
     parser.add_argument("--ode-use-encoder-labels", action="store_true",
-                        help="In --mode separate, use encoder-predicted theta as ODE training targets.")
+                        help="In --mode separate/ode_retrain, use encoder-predicted theta as ODE targets "
+                             "(default: sensor ground-truth theta labels).")
+    parser.add_argument(
+        "--ode-init-from-y-dot",
+        action="store_true",
+        help="Use sensor y_dot to set ODE initial theta_dot (training and free-run). "
+             "Default: finite difference from theta.",
+    )
     parser.add_argument("--ode-training-mode", default=None,
                         choices=["full", "subsequence"],
                         help="ODE training strategy: 'full' (entire trajectory) or "
@@ -657,8 +725,14 @@ def main():
     parser.add_argument("--encoder-batch-size", type=int, default=None)
     parser.add_argument("--encoder-lr", type=float, default=None)
     parser.add_argument("--ode-epochs", type=int, default=None)
-    parser.add_argument("--ode-batch-size", type=int, default=None)
-    parser.add_argument("--ode-lr", type=float, default=1e-5)
+    parser.add_argument("--ode-batch-size", type=int, default=128)
+    parser.add_argument(
+        "--ode-lr",
+        type=float,
+        default=None,
+        help="ODE learning rate override. Default: model config default "
+             "(linear_physics/stribeck_physics: 1e-2).",
+    )
     parser.add_argument("--decoder-epochs", type=int, default=None)
     parser.add_argument("--decoder-batch-size", type=int, default=None)
     parser.add_argument("--decoder-lr", type=float, default=None)
@@ -714,6 +788,7 @@ def main():
         align_theta=not args.no_theta_align,
         alignment_offset_min_s=args.alignment_offset_min_s,
         alignment_offset_max_s=args.alignment_offset_max_s,
+        auto_match_video_fps=not args.no_auto_match_video_fps,
         return_aux=True,
     )
     data, frames, frame_idx_map, aux = loaded

@@ -187,7 +187,9 @@ class NeuralCDEConfig(BaseConfig):
 class LinearPhysicsConfig(BaseConfig):
     dt: float = 0.05
     solver: str = "euler"
+    learning_rate: float = 1e-2
     epochs: int = 1000
+    batch_size: int = 128
     sequence_length: int = 20
     training_mode: str = "full"
 
@@ -196,7 +198,9 @@ class LinearPhysicsConfig(BaseConfig):
 class StribeckPhysicsConfig(BaseConfig):
     dt: float = 0.05
     solver: str = "euler"
+    learning_rate: float = 1e-2
     epochs: int = 1000
+    batch_size: int = 128
     sequence_length: int = 50
     training_mode: str = "full"
 

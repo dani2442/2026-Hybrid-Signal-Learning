@@ -129,22 +129,36 @@ class _PhysODEModel(BaseModel):
         self.ode_func_ = self.ode_factory().to(self._device)
 
         u = np.asarray(u, dtype=float).flatten()
-        y = np.asarray(y, dtype=float).flatten()
+        y_arr = np.asarray(y, dtype=float)
+        if y_arr.ndim == 2 and y_arr.shape[1] >= 2:
+            y = y_arr[:, 0].flatten()
+            y_dot = y_arr[:, 1].flatten()
+        else:
+            y = y_arr.flatten()
+            y_dot = None
 
         if c.training_mode == "full":
-            self.training_loss_ = self._train_full(u, y, logger)
+            self.training_loss_ = self._train_full(u, y, logger, y_dot=y_dot)
         else:
-            self.training_loss_ = self._train_subseq(u, y, logger)
+            self.training_loss_ = self._train_subseq(u, y, logger, y_dot=y_dot)
 
-    def _train_full(self, u, y, logger):
+    def _train_full(self, u, y, logger, *, y_dot=None):
         import torch, torch.optim as optim
         from tqdm.auto import tqdm
         c = self.config
 
         u_t = torch.tensor(u.reshape(-1, 1), dtype=self._dtype, device=self._device)
         y_t = torch.tensor(y, dtype=self._dtype, device=self._device)
+        y_dot_t = (
+            torch.tensor(y_dot, dtype=self._dtype, device=self._device)
+            if y_dot is not None
+            else None
+        )
         t_grid = torch.arange(len(y_t), dtype=self._dtype, device=self._device) * self.dt
-        omega0 = (y_t[1] - y_t[0]).item() / self.dt if len(y_t) > 1 else 0.0
+        if y_dot_t is not None and len(y_dot_t) > 0:
+            omega0 = y_dot_t[0].item()
+        else:
+            omega0 = (y_t[1] - y_t[0]).item() / self.dt if len(y_t) > 1 else 0.0
         x0 = torch.tensor([[y_t[0].item(), omega0]], dtype=self._dtype, device=self._device)
 
         params = list(self.ode_func_.parameters())
@@ -179,44 +193,84 @@ class _PhysODEModel(BaseModel):
             self.ode_func_.load_state_dict(best_state)
         return history
 
-    def _train_subseq(self, u, y, logger):
-        import torch, torch.optim as optim
+    def _train_subseq(self, u, y, logger, *, y_dot=None):
+        import torch, torch.optim as optim, torchsde
         from tqdm.auto import tqdm
         c = self.config
-        seq_len = c.sequence_length
+        seq_len = max(2, int(c.sequence_length))
 
         u_t = torch.tensor(u.reshape(-1, 1), dtype=self._dtype, device=self._device)
         y_t = torch.tensor(y, dtype=self._dtype, device=self._device)
+        y_dot_t = (
+            torch.tensor(y_dot, dtype=self._dtype, device=self._device)
+            if y_dot is not None
+            else None
+        )
+        if len(y_t) <= seq_len:
+            # Fallback for short trajectories: subsequences are ill-defined.
+            return self._train_full(u, y, logger, y_dot=y_dot)
+
         t_full = torch.arange(len(y_t), dtype=self._dtype, device=self._device) * self.dt
-        max_start = max(1, len(y_t) - seq_len - 1)
+        t_local = torch.arange(seq_len, dtype=self._dtype, device=self._device) * self.dt
+        valid_starts = np.arange(0, len(y_t) - seq_len, dtype=int)
+        if valid_starts.size == 0:
+            return self._train_full(u, y, logger, y_dot=y_dot)
 
         params = list(self.ode_func_.parameters())
         optimizer = optim.Adam(params, lr=c.learning_rate)
         history = []
+        batch_size = max(1, int(c.batch_size))
+        offsets = torch.arange(seq_len, device=self._device, dtype=torch.long)
 
         it = range(c.epochs)
         if c.verbose:
             it = tqdm(it, desc=f"Training {type(self).__name__} (subseq)", unit="epoch")
 
         for epoch in it:
-            self.ode_func_.train(); optimizer.zero_grad()
-            start = int(np.random.randint(0, max_start))
-            end = start + seq_len
-            y_seq = y_t[start:end]; t_seq = t_full[start:end]; u_seq = u_t[start:end]
-            omega0 = (y_seq[1] - y_seq[0]).item() / self.dt if len(y_seq) > 1 else 0.0
-            x0 = torch.tensor([[y_seq[0].item(), omega0]], dtype=self._dtype, device=self._device)
-            pred = self._simulate(u_seq, x0, t_seq)
-            loss = torch.mean((pred[:, 0] - y_seq) ** 2)
+            self.ode_func_.train()
+            optimizer.zero_grad()
+
+            starts_np = np.random.choice(valid_starts, size=batch_size, replace=True)
+            starts = torch.tensor(starts_np, dtype=torch.long, device=self._device)
+
+            theta0 = y_t[starts]
+            if y_dot_t is not None:
+                omega0 = y_dot_t[starts]
+            else:
+                next_starts = torch.clamp(starts + 1, max=len(y_t) - 1)
+                omega0 = (y_t[next_starts] - y_t[starts]) / self.dt
+            x0 = torch.stack([theta0, omega0], dim=1)  # (B, 2)
+
+            # Match notebook-style batched subsequence rollout:
+            # absolute time = batch_start + local rollout time.
+            self.ode_func_.t_series = t_full
+            self.ode_func_.u_series = u_t
+            self.ode_func_.batch_start_times = t_full[starts].unsqueeze(1)
+            pred = torchsde.sdeint(
+                self.ode_func_,
+                x0,
+                t_local,
+                method="euler",
+                dt=self.dt,
+            )  # (K, B, 2)
+            pred_theta = pred[:, :, 0]
+
+            target_idx = starts.unsqueeze(1) + offsets.unsqueeze(0)  # (B, K)
+            y_target = y_t[target_idx].transpose(0, 1)  # (K, B)
+            loss = torch.mean((pred_theta - y_target) ** 2)
             if torch.isnan(loss) or torch.isinf(loss):
-                history.append(float("nan")); continue
+                history.append(float("nan"))
+                continue
             loss.backward()
             torch.nn.utils.clip_grad_norm_(params, DEFAULT_GRAD_CLIP)
             optimizer.step()
-            loss_val = loss.item(); history.append(loss_val)
+            loss_val = loss.item()
+            history.append(loss_val)
             if c.verbose and hasattr(it, "set_postfix"):
                 it.set_postfix(loss=loss_val)
             if logger and c.wandb_log_every > 0 and (epoch + 1) % c.wandb_log_every == 0:
                 logger.log_metrics({"train/loss": loss_val, "train/epoch": epoch + 1}, step=epoch + 1)
+        self.ode_func_.batch_start_times = None
         return history
 
     # ── predict ───────────────────────────────────────────────────────

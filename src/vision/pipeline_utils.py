@@ -194,13 +194,17 @@ def train_ode_model_separate(args, data, run_dir: Path, *, y_override=None):
     n = len(data)
     tr, va, te = split_indices(n)
     y = y_override if y_override is not None else np.asarray(data.y)
+    y_dot = np.asarray(data.y_dot) if data.y_dot is not None else None
 
     dt = 1.0 / data.sampling_rate if data.sampling_rate > 0 else 1.0
+    # Keep ODE LR model-specific by default; only override when explicitly set.
+    default_ode_lr = None if args.ode_model in ("linear_physics", "stribeck_physics") else args.lr
+    ode_lr = args.ode_lr if args.ode_lr is not None else default_ode_lr
+
     common_cfg = dict(
         dt=dt,
         epochs=args.ode_epochs if args.ode_epochs is not None else args.epochs,
         batch_size=args.ode_batch_size if args.ode_batch_size is not None else args.batch_size,
-        learning_rate=args.ode_lr if args.ode_lr is not None else args.lr,
         device=args.device,
         seed=args.seed,
         verbose=True,
@@ -213,6 +217,8 @@ def train_ode_model_separate(args, data, run_dir: Path, *, y_override=None):
         from src.models.physics_ode import LinearPhysics
 
         ode_cfg = LinearPhysicsConfig(**common_cfg)
+        if ode_lr is not None:
+            ode_cfg.learning_rate = float(ode_lr)
         # Reuse --k-steps as subsequence window length for physics ODEs.
         ode_cfg.sequence_length = max(2, int(args.k_steps))
         if args.ode_training_mode:
@@ -223,6 +229,8 @@ def train_ode_model_separate(args, data, run_dir: Path, *, y_override=None):
         from src.models.physics_ode import StribeckPhysics
 
         ode_cfg = StribeckPhysicsConfig(**common_cfg)
+        if ode_lr is not None:
+            ode_cfg.learning_rate = float(ode_lr)
         # Reuse --k-steps as subsequence window length for physics ODEs.
         ode_cfg.sequence_length = max(2, int(args.k_steps))
         if args.ode_training_mode:
@@ -234,6 +242,7 @@ def train_ode_model_separate(args, data, run_dir: Path, *, y_override=None):
 
         ode_cfg = BlackboxODE2DConfig(
             hidden_dim=args.ode_hidden_dim,
+            learning_rate=ode_lr if ode_lr is not None else args.lr,
             k_steps=args.k_steps,
             **common_cfg,
         )
@@ -243,11 +252,26 @@ def train_ode_model_separate(args, data, run_dir: Path, *, y_override=None):
     else:
         raise ValueError(f"Unsupported --ode-model: {args.ode_model}")
 
-    print(f"ODE training mode: {ode_cfg.training_mode}")
+    print(
+        f"ODE training mode: {ode_cfg.training_mode} | "
+        f"lr={ode_cfg.learning_rate} | batch_size={ode_cfg.batch_size}"
+    )
+
+    y_fit = y
+    y_val = y[va] if len(va) > 0 else None
+    if (
+        getattr(args, "ode_init_from_y_dot", False)
+        and args.ode_model in ("linear_physics", "stribeck_physics")
+        and y_dot is not None
+    ):
+        y_fit = np.column_stack([np.asarray(y, dtype=float), y_dot]).astype(float)
+        if len(va) > 0:
+            y_val = y_fit[va]
+        print("Using sensor y_dot for ODE initial theta_dot during training.")
 
     model.fit(
-        train_data=(np.asarray(data.u)[tr], y[tr]),
-        val_data=(np.asarray(data.u)[va], y[va]) if len(va) > 0 else None,
+        train_data=(np.asarray(data.u)[tr], y_fit[tr]),
+        val_data=(np.asarray(data.u)[va], y_val) if len(va) > 0 else None,
     )
     model.save(run_dir / "ode_model.pt")
     return model, tr, va, te

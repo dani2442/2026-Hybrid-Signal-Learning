@@ -532,4 +532,58 @@ loaded_model, meta = hsl.load_model_checkpoint("model.pt")
 
 ## License
 
-See the repository for license details.
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| `ModuleNotFoundError: No module named 'torch'` | Install PyTorch: `pip install torch` or follow the [official guide](https://pytorch.org/get-started/locally/). |
+| Training is slow on CPU | Set `device="cuda"` in the config (or leave `"auto"` with a CUDA-capable GPU). |
+| `RuntimeError: CUDA out of memory` | Reduce `batch_size` or `hidden_size` in the model config. |
+| `ImportError: torchcde` | Run `pip install torchcde>=0.2.5`. |
+| Checkpoint fails to load | Ensure the library version matches the one used to save. Use `load_model()` for automatic class resolution. |
+
+
+
+```
+srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_video_pipeline.py \
+    --dataset swept_sine \
+    --mode separate \
+    --keypoint-labels-csv data/labels/swept_sine_true_labels.csv \
+    --epochs 20 --batch-size 32 --k-steps 20 \
+    --ode-training-mode subsequence \
+    --ode-epochs 500 \
+    --run-name swept_sine_separate_windowed \
+    --frame-height 96 --frame-width 96
+
+srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_video_pipeline.py \
+    --dataset multisine_05 \
+    --mode separate \
+    --keypoint-labels-csv data/labels/multisine_05_true_labels.csv \
+    --epochs 20 --batch-size 32 --k-steps 20 \
+    --ode-training-mode subsequence \
+    --ode-epochs 500 \
+    --run-name multisine_05_separate_windowed \
+    --frame-height 96 --frame-width 96
+
+.venv/bin/python examples/run_bab_video_pipeline.py \
+  --dataset swept_sine \
+  --mode ode_retrain \
+  --encoder-checkpoint results/swept_sine_separate_windowed_20260312_172115/encoder_best.pt \
+  --ode-model linear_physics \
+  --ode-training-mode subsequence \
+  --ode-epochs 1000 \
+  --ode-lr 1e-6 \
+  --run-name swept_sine_ode_retrain_from_sep_windowed
+
+.venv/bin/python examples/run_bab_video_pipeline.py \
+  --dataset swept_sine \
+  --mode ode_retrain \
+  --encoder-checkpoint results/swept_sine_separate_windowed_20260312_172115/encoder_best.pt \
+  --ode-model linear_physics \
+  --ode-training-mode subsequence \
+  --ode-epochs 1000 \
+  --ode-lr 1e-4 \
+  --k-steps 50 \
+  --run-name swept_sine_ode_retrain_linear_k50_uplot
+
+```
