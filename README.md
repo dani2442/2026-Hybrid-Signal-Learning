@@ -1,418 +1,535 @@
-# Hybrid Modeling
+# Hybrid Signal Learning
 
-System identification library combining classical models, discrete-time ML,
-neural ODE/SDE/CDE, and physics-informed hybrids under a single API.
+> **System identification library**: classical physics, machine learning, Neural ODE/SDE, and physics-informed hybrid models — all under one unified framework.
 
-## Features
+This repository provides a comprehensive benchmarking suite for **nonlinear system identification** combining first-principles physics models with modern deep learning. Models range from classical linear ODEs to Neural SDEs and Mamba sequence models, all trained and evaluated through a single, consistent pipeline on the **BAB (Ball-and-Beam)** experimental datasets.
 
-- **Unified interface** — every model exposes `fit()` → `predict(mode="OSA"|"FR")`.
-- **27 models** across 4 families: classical, discrete-time ML, neural continuous-time, and physics-guided hybrids.
-- **Config dataclasses** — typed, serialisable hyperparameters per model with registry lookup.
-- **Save / Load** — PyTorch-standard checkpoints with automatic class resolution.
-- **W&B logging** — opt-in via `config.wandb_project`; no-op when omitted.
-- **Benchmarking** — built-in runner for reproducible multi-model comparisons.
-- **Single SDE backend** — all continuous-time integration uses `torchsde` (ODE models use zero diffusion).
+---
 
-## Requirements
+## Table of Contents
 
-- Python **≥ 3.13**
-- CUDA-capable GPU recommended for neural ODE/SDE/CDE models (CPU works but is significantly slower)
+- [Key Features](#key-features)
+- [Project Structure](#project-structure)
+- [Installation](#installation)
+- [Datasets](#datasets)
+- [Models](#models)
+  - [Physics-Based Models](#1-physics-based-models-no-neural-network)
+  - [Black-Box Neural ODE Models](#2-black-box-neural-ode-models)
+  - [Hybrid Models (Physics + NN)](#3-hybrid-models-physics--neural-network)
+  - [Reservoir Computing](#4-reservoir-computing)
+  - [Stochastic Models](#5-stochastic-models)
+  - [Discrete-Time Sequence Models](#6-discrete-time-sequence-models)
+  - [Feedforward Model](#7-feedforward-model)
+- [NN Variants](#nn-variants)
+- [Training Pipeline](#training-pipeline)
+- [Usage](#usage)
+  - [Quick Start (Smoke Test)](#quick-start-smoke-test)
+  - [Full Benchmark Run](#full-benchmark-run)
+  - [CLI Reference](#cli-reference)
+- [Output Structure](#output-structure)
+- [Evaluation Metrics](#evaluation-metrics)
+- [Visualization](#visualization)
+- [Notebooks](#notebooks)
+- [License](#license)
+
+---
+
+## Key Features
+
+- **17 model families** spanning physics-only, black-box, hybrid, reservoir, stochastic, sequence, and feedforward paradigms.
+- **4 NN capacity variants** (`compact`, `base`, `wide`, `deep`) applicable to all neural models.
+- **Unified training loop** — a single `train_model()` function handles ODE, SDE, sequence, and feedforward models transparently.
+- **Protocol-2 evaluation** — deterministic 50/50 temporal train/test split for core datasets; non-core datasets are test-only.
+- **Multi-run statistical analysis** — train *N* independent seeds per model spec; aggregate mean/std metrics automatically.
+- **Rich visualization** — prediction overlays, residual plots, raincloud distributions, ACF, spectra, and more.
+- **Checkpoint & artifact system** — save/load model weights, export predictions as `.npz`, and persist full run metadata as JSON.
+
+---
+
+## Project Structure
+
+```
+hybrid_modeling/
+├── pyproject.toml                    # Project metadata & dependencies
+├── README.md                         # This file
+│
+├── bab_datasets/                     # Dataset loaders for BAB experiments
+│   ├── __init__.py
+│   ├── core.py                       # Dataset registry, loading, preprocessing, velocity estimation
+│   └── video.py                      # Optional video synchronization utilities
+│
+├── data/                             # Raw .mat experiment files (auto-downloaded if missing)
+│   ├── 01_rampa_positiva.mat
+│   ├── 02_rampa_negativa.mat
+│   ├── 03_random_steps_01..04.mat
+│   ├── 04_swept_sine.mat
+│   ├── 05_multisine_01.mat
+│   └── 06_multisine_02.mat
+│
+├── hybrid_signal_learning/           # Core library
+│   ├── __init__.py                   # Public API re-exports
+│   ├── data.py                       # ExperimentData, Protocol-2 splits, rollout builder
+│   ├── io.py                         # CSV/JSON/NPZ I/O, metric aggregation, run directory management
+│   ├── plots.py                      # All visualization functions
+│   ├── train.py                      # Unified training loop, ODE/SDE/sequence simulation, metrics
+│   └── models/                       # Model definitions
+│       ├── __init__.py               # Consolidated public API
+│       ├── base.py                   # InterpNeuralODEBase, NN variants, MLP builder
+│       ├── physics.py                # Linear ODE, Stribeck ODE
+│       ├── blackbox.py               # BlackBox, Structured, Adaptive Neural ODEs
+│       ├── hybrid.py                 # Joint & Frozen hybrid models (Linear + Stribeck)
+│       ├── esn.py                    # Continuous-Time Echo State Network
+│       ├── ude.py                    # Universal Differential Equation
+│       ├── neural_sde.py             # Neural Stochastic Differential Equation
+│       ├── sequence.py               # GRU, LSTM, TCN, Mamba sequence models
+│       ├── feedforward.py            # Feedforward NN with lagged I/O features
+│       └── factory.py                # build_model(), checkpoint save/load, iteration helpers
+│
+├── scripts/
+│   └── run_bab_models.py            # Main CLI entry point for training & evaluation
+│
+└── notebooks/                        # Jupyter notebooks for exploration & analysis
+    ├── All_blackboxes.ipynb
+    ├── BAB_models_analysis.ipynb
+    ├── BAB_NODE_models.ipynb
+    ├── HYCO_BAB.ipynb
+    ├── Notebook_with_NODE.ipynb
+    └── Pedagogical_example_NODE.ipynb
+```
+
+---
 
 ## Installation
 
-```bash
-# recommended (uses uv lockfile)
-uv sync
+### Prerequisites
 
-# or with pip
+- **Python ≥ 3.13**
+- (Optional) CUDA-enabled GPU for faster training
+
+### Install
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd hybrid_modeling
+
+# Create a virtual environment (recommended)
+python -m venv .venv
+source .venv/bin/activate      # Linux / macOS
+# .venv\Scripts\activate       # Windows
+
+# Install the package with all dependencies
 pip install -e .
+
+# (Optional) Install development dependencies
+pip install -e ".[dev]"
 ```
 
-> **GPU/CUDA:** If `torch` was installed without CUDA support, reinstall it
-> following the [PyTorch guide](https://pytorch.org/get-started/locally/).
-> The `device` config field defaults to `"auto"`, which selects CUDA when
-> available and falls back to CPU.
+### Core Dependencies
 
-## Quick Start
+| Package | Version | Purpose |
+|---|---|---|
+| `torch` | ≥ 2.10.0 | Neural network framework |
+| `torchdiffeq` | — | ODE integration (`odeint`) |
+| `torchsde` | ≥ 0.2.6 | SDE integration (`sdeint`) |
+| `numpy` | ≥ 2.4.2 | Numerical computing |
+| `scipy` | ≥ 1.16.1 | Signal processing, `.mat` loading |
+| `matplotlib` | ≥ 3.10.8 | Visualization |
+| `scikit-learn` | ≥ 1.8.0 | Metrics and preprocessing |
+| `statsmodels` | ≥ 0.14.6 | Statistical analysis (ACF, etc.) |
+| `tqdm` | ≥ 4.67.2 | Progress bars |
+| `wandb` | ≥ 0.24.2 | Experiment tracking |
+| `transformers` | ≥ 5.1.0 | Transformer utilities |
+| `optuna` | ≥ 4.7.0 | Hyperparameter optimization |
 
-```python
-from src import Dataset, GRU, Metrics
-from src.config import GRUConfig
+---
 
-# 1. Load data
-ds = Dataset.from_bab_experiment("multisine_05")
-train, val, test = ds.train_val_test_split(train=0.7, val=0.15)
+## Datasets
 
-# 2. Configure & train
-cfg = GRUConfig(epochs=200, hidden_size=64)
-model = GRU(cfg)
-model.fit(train.arrays, val_data=val.arrays)
+The datasets come from a **Ball-and-Beam (BAB)** experimental testbed for nonlinear system identification. Each `.mat` file contains time-series recordings of input voltage (`u`), output position (`y`), reference signal (`y_ref`), and trigger information.
 
-# 3. Evaluate
-y_osa = model.predict(test.u, test.y, mode="OSA")
-y_fr  = model.predict(test.u, test.y, mode="FR")
-print(Metrics.compute_all(test.y, y_fr))
+| Dataset Key | File | Description | Protocol-2 Role |
+|---|---|---|---|
+| `rampa_positiva` | `01_rampa_positiva.mat` | Positive ramp excitation | Test only |
+| `rampa_negativa` | `02_rampa_negativa.mat` | Negative ramp excitation | Test only |
+| `random_steps_01` | `03_random_steps_01.mat` | Random step sequence (variant 1) | **Train + Test** (50/50) |
+| `random_steps_02` | `03_random_steps_02.mat` | Random step sequence (variant 2) | **Train + Test** (50/50) |
+| `random_steps_03` | `03_random_steps_03.mat` | Random step sequence (variant 3) | **Train + Test** (50/50) |
+| `random_steps_04` | `03_random_steps_04.mat` | Random step sequence (variant 4) | **Train + Test** (50/50) |
+| `swept_sine` | `04_swept_sine.mat` | Frequency-swept sine wave | Test only |
+| `multisine_05` | `05_multisine_01.mat` | Multi-sine excitation (variant 1) | **Train + Test** (50/50) |
+| `multisine_06` | `06_multisine_02.mat` | Multi-sine excitation (variant 2) | **Train + Test** (50/50) |
 
-# 4. Save / load
-model.save("checkpoints/gru.pt")
+### Data Preprocessing
 
-from src.models.base import load_model
-model = load_model("checkpoints/gru.pt")
+- **Trigger-based cropping** — signals are trimmed using the trigger channel to remove idle regions.
+- **Resampling** — default decimation factor of 50 reduces sampling rate for efficiency.
+- **Velocity estimation** — $\dot{y}$ is computed via configurable methods: `central` differences (default), Savitzky–Golay filter, spline derivative, Butterworth filter, or total-variation regularization.
+- **Auto-download** — missing `.mat` files are automatically fetched from the [sysid repository](https://github.com/helonayala/sysid).
+
+---
+
+## Models
+
+All models predict a 2-D state vector $\mathbf{x} = [\theta, \dot{\theta}]^\top$ (position and velocity) from input $u$ (voltage). The table below summarizes all 17 model families:
+
+### Complete Model Reference
+
+| # | Model Key | Class | Type | Physics Prior | Neural Component | Description |
+|---|---|---|---|---|---|---|
+| 1 | `linear` | `LinearPhysODE` | ODE | Full | None | $J\ddot{\theta} + R\dot{\theta} + K(\theta + \delta) = \tau u$ |
+| 2 | `stribeck` | `StribeckPhysODE` | ODE | Full | None | Linear + Stribeck friction: $F_c + (F_s - F_c)e^{-(\dot{\theta}/v_s)^2}$ |
+| 3 | `blackbox` | `BlackBoxODE` | ODE | None | Full | $\dot{\mathbf{x}} = \text{NN}(\theta, \dot{\theta}, u)$ |
+| 4 | `structured_blackbox` | `StructuredBlackBoxODE` | ODE | Kinematic | Partial | $\dot{\theta}_0 = \theta_1$; $\ddot{\theta} = \text{NN}(\theta, \dot{\theta}, u)$ |
+| 5 | `adaptive_blackbox` | `AdaptiveBlackBoxODE` | ODE | Kinematic | Dual NN | Base dynamics NN + near-zero residual NN |
+| 6 | `ct_esn` | `ContinuousTimeESN` | ODE | Kinematic | Reservoir | Echo State Network with augmented reservoir state |
+| 7 | `hybrid_joint` | `HybridJointODE` | ODE | Linear (learnable) | Residual NN | $\ddot{\theta} = \text{physics}(\theta, \dot{\theta}, u) + \text{NN}(\theta, \dot{\theta}, u)$ |
+| 8 | `hybrid_joint_stribeck` | `HybridJointStribeckODE` | ODE | Stribeck (learnable) | Residual NN | Stribeck physics + NN residual, jointly trained |
+| 9 | `hybrid_frozen` | `HybridFrozenPhysODE` | ODE | Linear (frozen) | Residual NN | Pre-trained linear params frozen; only NN trains |
+| 10 | `hybrid_frozen_stribeck` | `HybridFrozenStribeckPhysODE` | ODE | Stribeck (frozen) | Residual NN | Pre-trained Stribeck params frozen; only NN trains |
+| 11 | `ude` | `UDEODE` | ODE | Linear SS (learnable) | Residual NN | $\ddot{\theta} = A\mathbf{x} + Bu + \text{NN}(\theta, \dot{\theta}, u)$ |
+| 12 | `neural_sde` | `BlackBoxSDE` | SDE | Kinematic | Drift + Diffusion | $d\mathbf{x} = f(\mathbf{x}, u)\,dt + g(\mathbf{x}, u)\,dW_t$ |
+| 13 | `gru` | `GRUSeqModel` | Sequence | None | Full | GRU encoder → linear decoder |
+| 14 | `lstm` | `LSTMSeqModel` | Sequence | None | Full | LSTM encoder → linear decoder |
+| 15 | `tcn` | `TCNSeqModel` | Sequence | None | Full | Temporal Convolutional Network with causal convolutions |
+| 16 | `mamba` | `MambaSeqModel` | Sequence | None | Full | Selective State Space Model (Mamba architecture) |
+| 17 | `feedforward_nn` | `FeedForwardNN` | Discrete | None | Full | MLP with lagged I/O features, autoregressive rollout |
+
+---
+
+### 1. Physics-Based Models (No Neural Network)
+
+These models have **no learnable neural network component** — only physical parameters are optimized.
+
+#### Linear ODE (`linear`)
+
+Classical second-order system:
+
+$$J\ddot{\theta} + R\dot{\theta} + K(\theta + \delta) = \tau \cdot u$$
+
+Parameters: inertia $J$, damping $R$, stiffness $K$, offset $\delta$, gain $\tau$ (all learned in log-space for positivity).
+
+#### Stribeck ODE (`stribeck`)
+
+Extends the linear model with **Stribeck friction**:
+
+$$J\ddot{\theta} + R\dot{\theta} + K(\theta + \delta) + F_{\text{str}}(\dot{\theta}) = \tau \cdot u$$
+
+where $F_{\text{str}} = \left[F_c + (F_s - F_c)\exp\!\left(-\left(\frac{\dot{\theta}}{v_s}\right)^2\right)\right]\text{sgn}(\dot{\theta}) + b\dot{\theta}$
+
+---
+
+### 2. Black-Box Neural ODE Models
+
+These learn dynamics entirely from data using neural networks integrated via `torchdiffeq.odeint`.
+
+| Model | Kinematic Constraint | Architecture | Notes |
+|---|---|---|---|
+| `blackbox` | None | $\dot{\mathbf{x}} = \text{MLP}(\theta, \dot{\theta}, u) \to \mathbb{R}^2$ | Fully unconstrained |
+| `structured_blackbox` | $\dot{\theta}_0 = \theta_1$ | $\ddot{\theta} = \text{MLP}(\theta, \dot{\theta}, u) \to \mathbb{R}^1$ | Improved sample efficiency |
+| `adaptive_blackbox` | $\dot{\theta}_0 = \theta_1$ | Main MLP + zero-init residual MLP | Two-stream acceleration prediction |
+
+---
+
+### 3. Hybrid Models (Physics + Neural Network)
+
+These combine a **physics backbone** with a **neural network residual correction**:
+
+$$\ddot{\theta} = \underbrace{\ddot{\theta}_{\text{physics}}}_{\text{first-principles}} + \underbrace{\text{NN}(\theta, \dot{\theta}, u)}_{\text{learned residual}}$$
+
+| Model | Physics Backbone | Params Trainable? | Notes |
+|---|---|---|---|
+| `hybrid_joint` | Linear ODE | Yes (jointly) | Physics + NN trained together |
+| `hybrid_joint_stribeck` | Stribeck ODE | Yes (jointly) | Stribeck physics + NN residual |
+| `hybrid_frozen` | Linear ODE | No (frozen) | Pre-trained linear params; only NN trains |
+| `hybrid_frozen_stribeck` | Stribeck ODE | No (frozen) | Pre-trained Stribeck params; only NN trains |
+
+#### Universal Differential Equation (`ude`)
+
+A **state-space formulation** with learnable linear matrices:
+
+$$\ddot{\theta} = A\mathbf{x} + Bu + \text{NN}(\theta, \dot{\theta}, u)$$
+
+where $A \in \mathbb{R}^{1 \times 2}$ and $B \in \mathbb{R}^{1 \times 1}$ are learnable.
+
+---
+
+### 4. Reservoir Computing
+
+#### Continuous-Time Echo State Network (`ct_esn`)
+
+Augmented ODE state $\mathbf{z} = [\theta, \dot{\theta}, \mathbf{r}]$ where $\mathbf{r} \in \mathbb{R}^D$ is the reservoir hidden state:
+
+$$\dot{\mathbf{r}} = \lambda\left(-\mathbf{r} + \tanh(W_{\text{res}}\mathbf{r} + W_{\text{in}}[\mathbf{x}, u])\right)$$
+
+$$\ddot{\theta} = W_{\text{out}}[\mathbf{r}, \mathbf{x}, u]$$
+
+The reservoir matrix $W_{\text{res}}$ is **fixed** (sparse, scaled to a target spectral radius); only $W_{\text{in}}$, $W_{\text{out}}$, and $\lambda$ are learned.
+
+---
+
+### 5. Stochastic Models
+
+#### Neural SDE (`neural_sde`)
+
+Models dynamics with **stochastic noise** via Ito SDE:
+
+$$d\mathbf{x} = f(\mathbf{x}, u)\,dt + g(\mathbf{x}, u)\,dW_t$$
+
+- **Drift** $f$: structured (kinematic constraint) MLP predicting acceleration.
+- **Diffusion** $g$: small MLP producing state-dependent diagonal noise $[\sigma_{\text{pos}}, \sigma_{\text{vel}}]$.
+- Integrated with `torchsde.sdeint` (Euler–Maruyama method).
+
+---
+
+### 6. Discrete-Time Sequence Models
+
+These map the full input sequence $u(t)$ directly to the state trajectory $[\theta(t), \dot{\theta}(t)]$ in a **sequence-to-sequence** fashion.
+
+| Model | Architecture | Key Feature |
+|---|---|---|
+| `gru` | Multi-layer GRU → Linear | Gated recurrent units |
+| `lstm` | Multi-layer LSTM → Linear | Long short-term memory cells |
+| `tcn` | Causal Conv1D residual blocks → Linear | Exponentially increasing dilation for large receptive field |
+| `mamba` | Selective SSM blocks → Linear | Input-dependent state transitions (Mamba architecture) |
+
+---
+
+### 7. Feedforward Model
+
+#### Feedforward NN (`feedforward_nn`)
+
+A standard MLP operating in **discrete time** with lagged I/O features:
+
+$$[\theta(k), \dot{\theta}(k)] = \text{MLP}\!\big(\theta(k\!-\!1), \dot{\theta}(k\!-\!1), u(k\!-\!1), \ldots, \theta(k\!-\!L), \dot{\theta}(k\!-\!L), u(k\!-\!L)\big)$$
+
+- **Lag** $L = 10$ (default) — the feature vector has dimension $L \times 3$.
+- At inference, predicted outputs are **fed back** as lagged features for autoregressive free-run simulation.
+
+---
+
+## NN Variants
+
+All neural-network-based models support configurable capacity through **NN variants**:
+
+| Variant | Hidden Dim | Depth (layers) | Dropout | Typical Use Case |
+|---|---|---|---|---|
+| `compact` | 64 | 2 | 0.05 | Fast prototyping, limited data |
+| `base` | 128 | 3 | 0.05 | Default — balanced performance |
+| `wide` | 256 | 3 | 0.05 | Higher capacity, same depth |
+| `deep` | 128 | 5 | 0.05 | Deeper representations |
+
+All MLPs use **SELU activation** with **AlphaDropout** for self-normalizing behavior.
+
+---
+
+## Training Pipeline
+
+The training pipeline follows these steps:
+
+```
+┌──────────────────┐    ┌────────────────────┐    ┌──────────────────┐
+│  Load Datasets   │───▶│  Protocol-2 Split   │───▶│  Build Rollout   │
+│  (BAB .mat)      │    │  50/50 temporal      │    │  (concatenate)   │
+└──────────────────┘    └────────────────────┘    └──────────────────┘
+                                                          │
+                        ┌────────────────────┐            ▼
+                        │  For each model     │    ┌──────────────────┐
+                        │  spec × N runs:     │◀───│  Compute Valid   │
+                        │                     │    │  Start Indices   │
+                        │  1. Build model     │    └──────────────────┘
+                        │  2. Train (k-step)  │
+                        │  3. Evaluate all DS  │
+                        │  4. Save checkpoint  │
+                        │  5. Save predictions │
+                        └─────────┬───────────┘
+                                  ▼
+                        ┌────────────────────┐
+                        │  Aggregate metrics  │
+                        │  Save CSV / JSON    │
+                        │  Plot convergence   │
+                        └────────────────────┘
 ```
 
-## Example Scripts
+### Training Strategy
 
-| Script | Purpose |
-|--------|---------|
-| `examples/train_single.py` | Train one model, evaluate, save checkpoint |
-| `examples/train_all.py` | Train multiple models and compare metrics |
-| `examples/load_and_test.py` | Load a checkpoint and evaluate on test data |
+- **K-step prediction loss**: random windows of `k_steps=20` are sampled; models predict forward and MSE is computed against ground truth.
+- **Position-only loss** (default): loss targets position channel only, which empirically improves generalization.
+- **Optimizer**: Adam with `lr=0.01`.
+- **Batch size**: 128 random start indices per epoch.
+- **Epochs**: 1000 (default).
+
+---
+
+## Usage
+
+### Quick Start (Smoke Test)
 
 ```bash
-# Train a GRU with defaults
-python examples/train_single.py --model gru
-
-# Train all default models with W&B logging
-python examples/train_all.py --wandb my-project
-
-# Load and test a saved model
-python examples/load_and_test.py checkpoints/gru_multisine_05.pt
+python scripts/run_bab_models.py --quick
 ```
 
-## Unified Model API
+This runs a minimal configuration:
+- 1 training run (instead of 10)
+- 60 epochs (instead of 1000)
+- Only the `base` NN variant
+- Subset of datasets: `multisine_05`, `multisine_06`, `random_steps_01`, `swept_sine`
 
-Every model inherits from `BaseModel`:
+### Full Benchmark Run
 
-```python
-class BaseModel:
-    def __init__(self, config: BaseConfig): ...
-    def fit(self, train_data, val_data=None) -> self: ...
-    def predict(self, u, y, mode="OSA"|"FR") -> np.ndarray: ...
-    def save(self, path): ...
-
-    @classmethod
-    def load(cls, path) -> BaseModel: ...
+```bash
+python scripts/run_bab_models.py \
+    --models linear,stribeck,blackbox,structured_blackbox,hybrid_joint,ude,gru,mamba \
+    --nn-variants base,wide,deep \
+    --n-runs 10 \
+    --epochs 1000 \
+    --output-root results/bab_runs
 ```
 
-- `train_data` / `val_data` are `(u, y)` tuples (use `dataset.arrays`).
-- Configs are Python dataclasses inheriting `BaseConfig`.
+### Train Specific Models Only
 
-## Configuration
+```bash
+# Physics-only models
+python scripts/run_bab_models.py --models linear,stribeck --n-runs 5
 
-```python
-from src.config import GRUConfig, MODEL_CONFIGS
+# Only hybrid models
+python scripts/run_bab_models.py --models hybrid_joint,hybrid_frozen,ude --nn-variants base,wide
 
-# Create with defaults
-cfg = GRUConfig()
-
-# Override fields
-cfg = GRUConfig(epochs=500, hidden_size=128, wandb_project="my-project")
-
-# Serialise / deserialise
-d = cfg.to_dict()
-cfg2 = GRUConfig.from_dict(d)
-
-# Registry lookup
-cfg_cls = MODEL_CONFIGS["gru"]  # → GRUConfig
+# Only sequence models
+python scripts/run_bab_models.py --models gru,lstm,tcn,mamba --nn-variants compact,base
 ```
 
-Shared fields on every config: `nu`, `ny`, `learning_rate`, `epochs`,
-`batch_size`, `verbose`, `device`, `seed`, `wandb_project`,
-`wandb_run_name`, `wandb_log_every`, `early_stopping_patience`.
+### CLI Reference
 
-## Save & Load
+| Argument | Default | Description |
+|---|---|---|
+| `--output-root` | `results/bab_runs` | Base folder for run outputs |
+| `--run-name` | Auto (timestamp) | Custom name for the run folder |
+| `--models` | All 17 models | Comma-separated model keys |
+| `--nn-variants` | `base,wide,deep` | Comma-separated NN variant names |
+| `--n-runs` | `10` | Independent training runs per model specification |
+| `--epochs` | `1000` | Number of training epochs |
+| `--lr` | `0.01` | Learning rate (Adam) |
+| `--batch-size` | `128` | Batch size (random start indices per epoch) |
+| `--k-steps` | `20` | Prediction horizon for training loss |
+| `--obs-dim` | `2` | Observation dimension (position + velocity) |
+| `--resample-factor` | `50` | Decimation factor for raw data |
+| `--y-dot-method` | `central` | Velocity estimation method (`central`, `savgol`, `spline`, `butter`) |
+| `--seed` | `1234` | Base random seed |
+| `--device` | `auto` | Compute device (`auto`, `cpu`, `cuda`) |
+| `--quick` | `false` | Enable smoke-test mode |
+| `--include-datasets` | All | Comma-separated subset of dataset keys |
+| `--save-predictions` | `true` | Save full rollout predictions as `.npz` |
+| `--progress` / `--no-progress` | `true` | Enable/disable tqdm progress bars |
 
-```python
-model.save("checkpoints/model.pt")
+---
 
-from src.models.base import load_model
-model = load_model("checkpoints/model.pt")
-```
+## Output Structure
 
-Checkpoints store: class name, config dict, model state, extra state
-(e.g. physics parameters), and training loss history.
-
-## W&B Logging
-
-Set `config.wandb_project` to enable. Metrics are logged per-epoch
-automatically:
-
-```python
-cfg = GRUConfig(wandb_project="sysid", wandb_run_name="gru-run-1")
-model = GRU(cfg)
-model.fit(train.arrays, val_data=val.arrays)  # logs to W&B
-```
-
-## Dataset
-
-```python
-from src import Dataset
-
-# List available experiments
-Dataset.list_bab_experiments()
-
-# Load with preprocessing
-ds = Dataset.from_bab_experiment("multisine_05", preprocess=True, resample_factor=50)
-
-# Split options
-train, test = ds.split(0.8)
-train, val, test = ds.train_val_test_split(train=0.7, val=0.15)
-
-# Access (u, y) tuples
-u, y = ds.arrays
-```
-
-Available experiments: `rampa_positiva`, `rampa_negativa`,
-`random_steps_01`–`04`, `swept_sine`, `multisine_05`, `multisine_06`.
-
-## Model Catalogue
-
-### Model Summary
-
-| Model | Family | Time | Stateful | Physics |
-|-------|--------|------|----------|---------|
-| NARX | Classical | Discrete | No | No |
-| ARIMA(X) | Classical | Discrete | No | No |
-| Exponential Smoothing | Classical | Discrete | No | No |
-| Random Forest | ML | Discrete | No | No |
-| Neural Network | ML | Discrete | No | No |
-| GRU | ML | Discrete | Yes | No |
-| LSTM | ML | Discrete | Yes | No |
-| TCN | ML | Discrete | No | No |
-| Mamba | ML | Discrete | Yes | No |
-| Neural ODE | Neural CT | Continuous | Yes | No |
-| Neural SDE | Neural CT | Continuous | Yes | No |
-| Neural CDE | Neural CT | Continuous | Yes | No |
-| Hybrid Linear Beam | Hybrid | Continuous | Yes | Yes |
-| Hybrid Nonlinear Cam | Hybrid | Continuous | Yes | Yes |
-| UDE | Hybrid | Continuous | Yes | Yes |
-
-**Additional 2-D black-box variants** (all share a unified `_BlackboxODE2D` base):
-
-| NODE | NSDE | NCDE |
-|------|------|------|
-| `VanillaNODE2D` | `VanillaNSDE2D` | `VanillaNCDE2D` |
-| `StructuredNODE` | `StructuredNSDE` | `StructuredNCDE` |
-| `AdaptiveNODE` | `AdaptiveNSDE` | `AdaptiveNCDE` |
-
-**Physics ODE wrappers:** `LinearPhysics`, `StribeckPhysics`
-
-All 27 models follow the same `fit` / `predict` / `save` / `load` interface.
-
-### Mathematical Notation
-
-- Discrete index: $k$, continuous time: $t$
-- Input: $u_k$ or $u(t)$, output: $y_k$ or $y(t)$
-- State: $x_k$ or $x(t)$, position/velocity: $\theta$, $\omega$
-
-### 1) Classical / Statistical
-
-#### NARX
-
-$$
-y_k = \sum_{i=1}^{M} \theta_i \phi_i(y_{k-1}, \ldots, y_{k-n_y}, u_{k-1}, \ldots, u_{k-n_u}) + e_k
-$$
-
-Polynomial terms selected with FROLS.
-
-#### ARIMA(X)
-
-$$
-\Phi(B)(1 - B)^d y_k = \Theta(B) e_k + \beta u_k
-$$
-
-#### Exponential Smoothing (Holt-Winters)
-
-$$
-\hat{y}_{k+1|k} = \alpha y_k + (1 - \alpha)\hat{y}_{k|k-1}
-$$
-
-### 2) Machine Learning (Discrete-Time)
-
-#### Random Forest
-
-$$
-y_k = \frac{1}{T}\sum_{t=1}^{T} f_t(x_k)
-$$
-
-#### Neural Network (MLP)
-
-$$
-y_k = W_L \sigma(\cdots \sigma(W_1 x_k + b_1)\cdots) + b_L
-$$
-
-#### GRU
-
-$$
-z_k = \sigma(W_z[h_{k-1}, x_k]),\quad r_k = \sigma(W_r[h_{k-1}, x_k])
-$$
-
-$$
-\tilde{h}_k = \tanh(W_h[r_k \odot h_{k-1}, x_k]),\quad h_k = (1-z_k)\odot h_{k-1} + z_k \odot \tilde{h}_k
-$$
-
-#### LSTM
-
-$$
-f_k = \sigma(W_f[h_{k-1}, x_k]),\quad i_k = \sigma(W_i[h_{k-1}, x_k])
-$$
-
-$$
-c_k = f_k \odot c_{k-1} + i_k \odot \tanh(W_c[h_{k-1}, x_k]),\quad h_k = \sigma(W_o[h_{k-1}, x_k]) \odot \tanh(c_k)
-$$
-
-#### TCN
-
-Causal dilated 1-D convolutions with residual connections.
-
-#### Mamba (Selective SSM)
-
-$$
-\dot{x}(t) = Ax(t) + B(u(t))u(t),\quad y(t) = C(u(t))x(t) + Du(t)
-$$
-
-Input-dependent discretisation: $\bar{A}_k = \exp(\Delta_k A)$.
-
-### 3) Neural Continuous-Time
-
-All continuous-time models use **torchsde** as the integration backend.
-ODE models are expressed as SDEs with zero diffusion, giving a single
-consistent solver interface across the library.
-
-#### Neural ODE
-
-$$
-\dot{x}(t) = f_\theta(x(t), u(t)),\quad x(0) = x_0
-$$
-
-#### Neural SDE
-
-$$
-dx(t) = f_\theta(x(t), u(t))\,dt + g_\phi(x(t), u(t))\,dW_t
-$$
-
-#### Neural CDE
-
-$$
-\dot{z}(t) = f_\theta(z(t))\,\dot{X}(t),\quad z(t_0) = z_0
-$$
-
-### 4) Physics-Guided Hybrids
-
-#### Hybrid Linear Beam
-
-$$
-J\ddot{\theta} + R\dot{\theta} + K(\theta + \delta) = \tau V
-$$
-
-#### Hybrid Nonlinear Cam
-
-$$
-J_{\mathrm{eff}}(\theta)\ddot{\theta} = \tau_{\mathrm{motor}}(V, \dot{\theta}) - k(y(\theta) - \delta)A(\theta) - B(\theta)\dot{\theta}^2
-$$
-
-#### UDE (Universal Differential Equation)
-
-$$
-\dot{\omega} = \frac{\tau V - R\omega - K(\theta + \delta)}{J} + r_\phi(\omega)
-$$
-
-## Architecture
+Each run produces a structured output directory:
 
 ```
-src/
-├── __init__.py            # Public re-exports
-├── config.py              # Dataclass configs + MODEL_CONFIGS registry
-├── logging.py             # WandbLogger wrapper
-├── data/
-│   └── dataset.py         # Dataset loaders & preprocessing
+results/bab_runs/<run_name>/
+├── metadata/
+│   ├── config.json                    # Full run configuration
+│   ├── best_model_ids_test_r2_pos.json  # Best model ID per family (by test R²)
+│   └── model_registry.json            # Registry of all trained models
 ├── models/
-│   ├── base.py            # BaseModel ABC, resolve_device(), PickleStateMixin
-│   ├── sequence_base.py   # Shared base for GRU / LSTM / TCN / Mamba
-│   ├── torchsde_utils.py  # SDE integration helpers, interp_u()
-│   ├── blackbox_ode.py    # Unified ODE+SDE 2-D base (_BlackboxODE2D)
-│   ├── blackbox_sde.py    # Re-exports NSDE classes (backward compat)
-│   ├── blackbox_cde.py    # CDE-inspired 2-D variants
-│   └── ...                # One file per model family
-├── benchmarking/
-│   └── runner.py          # BenchmarkRunner + helpers
-├── utils/
-│   ├── frols.py           # FROLS term selection for NARX
-│   └── regression.py      # Regression utilities
-├── validation/
-│   └── metrics.py         # MSE, RMSE, R², NRMSE, FIT%
-└── visualization/
-    └── plots.py           # Plotting helpers
+│   ├── linear__physics__run00.pt      # Model checkpoints
+│   ├── blackbox__base__run00.pt
+│   ├── hybrid_joint__wide__run03.pt
+│   └── ...
+├── predictions/
+│   ├── linear__physics__run00.npz     # Full rollout predictions per dataset
+│   └── ...
+├── tables/
+│   ├── training_history.csv           # Epoch-by-epoch loss for all models
+│   ├── metrics_long.csv               # Per-model, per-dataset, per-split metrics
+│   └── metrics_aggregate.csv          # Mean ± std grouped by model family
+└── plots/
+    └── training_loss_curves.png       # Convergence plot for all models
 ```
 
+---
+
+## Evaluation Metrics
+
+All models are evaluated on both train and test splits with the following metrics:
+
+| Metric | Formula | Description |
+|---|---|---|
+| **RMSE (pos)** | $\sqrt{\frac{1}{N}\sum_i (y_i - \hat{y}_i)^2}$ | Root mean squared error for position |
+| **RMSE (vel)** | Same, for velocity channel | Root mean squared error for velocity |
+| **R² (pos)** | $1 - \frac{\sum(y_i - \hat{y}_i)^2}{\sum(y_i - \bar{y})^2}$ | Coefficient of determination (position) |
+| **R² (vel)** | Same, for velocity channel | Coefficient of determination (velocity) |
+| **FIT% (pos)** | $100\left(1 - \frac{\lVert y - \hat{y}\rVert}{\lVert y - \bar{y}\rVert}\right)$ | NRMSE-based fit percentage (position) |
+| **FIT% (vel)** | Same, for velocity channel | NRMSE-based fit percentage (velocity) |
+
+---
+
+## Visualization
+
+The library provides a rich set of plotting functions in `hybrid_signal_learning/plots.py`:
+
+| Function | Description |
+|---|---|
+| `plot_training_curves()` | Epoch-vs-loss convergence for all models |
+| `plot_predictions()` | Measured vs. predicted (position + velocity) with train/test split marker |
+| `plot_zoom_position()` | Three zoomed windows (start, middle, end) of position predictions |
+| `plot_residuals()` | Time-series residual plots for position and velocity |
+| `plot_raincloud_models()` | Raincloud (violin + box + scatter) of position residuals per model |
+| `plot_y_vs_yhat()` | Scatter plot of measured vs. predicted position |
+| `plot_acf()` | Autocorrelation function of residuals |
+| `plot_spectra()` | Frequency-domain spectra of residuals |
+
+Each plot function accepts an optional `save_path` argument to export figures as PNG files at 150 DPI.
+
+---
+
+## Notebooks
+
+| Notebook | Description |
+|---|---|
+| `All_blackboxes.ipynb` | Comparison of all black-box model variants |
+| `BAB_models_analysis.ipynb` | Post-hoc analysis of trained models with metrics tables and plots |
+| `BAB_NODE_models.ipynb` | Neural ODE model exploration on BAB data |
+| `HYCO_BAB.ipynb` | Hybrid continuous-time model experiments |
+| `Notebook_with_NODE.ipynb` | Step-by-step Neural ODE workflow |
+| `Pedagogical_example_NODE.ipynb` | Educational introduction to Neural ODEs |
+
+---
+
+## Programmatic API
+
+```python
+import hybrid_signal_learning as hsl
+
+# Load datasets with Protocol-2 splits
+data_map = hsl.load_protocol2_datasets(y_dot_method="central")
+
+# Build a model
+model = hsl.build_model("hybrid_joint", nn_variant="wide")
+
+# Build training data
+train_data = hsl.build_train_rollout_data(data_map)
+tensors = hsl.to_tensor_bundle(t=train_data.t, u=train_data.u, y_sim=train_data.y_sim, device="cpu")
+valid_starts = hsl.compute_valid_start_indices(train_data.segments, k_steps=20)
+
+# Train
+cfg = hsl.TrainConfig(epochs=500, lr=0.01, k_steps=20)
+model, history = hsl.train_model(model=model, tensors=tensors, valid_start_indices=valid_starts, cfg=cfg)
+
+# Evaluate on a dataset
+results = hsl.evaluate_model_on_dataset(model=model, ds=data_map["multisine_05"], device="cpu")
+print(results["metrics"]["test"])
+
+# Save & reload checkpoint
+hsl.save_model_checkpoint("model.pt", model=model, model_key="hybrid_joint", nn_variant="wide", run_idx=0, seed=42)
+loaded_model, meta = hsl.load_model_checkpoint("model.pt")
 ```
-examples/
-├── train_single.py        # Train one model
-├── train_all.py           # Train & compare multiple models
-└── load_and_test.py       # Load checkpoint & evaluate
-```
 
-## Documentation
+---
 
-- [Benchmarking guide](docs/benchmarking.md) — protocol, runner API, W&B integration
-- [Hybrid models](docs/hybrid_models.md) — equations and notation for physics-guided models
-- [Neural CDE](docs/neural_cde.md) — mathematical formulation and API reference
+## License
 
-## Troubleshooting
-
-| Problem | Solution |
-|---------|----------|
-| `ModuleNotFoundError: No module named 'torch'` | Install PyTorch: `pip install torch` or follow the [official guide](https://pytorch.org/get-started/locally/). |
-| Training is slow on CPU | Set `device="cuda"` in the config (or leave `"auto"` with a CUDA-capable GPU). |
-| `RuntimeError: CUDA out of memory` | Reduce `batch_size` or `hidden_size` in the model config. |
-| `ImportError: torchcde` | Run `pip install torchcde>=0.2.5`. |
-| Checkpoint fails to load | Ensure the library version matches the one used to save. Use `load_model()` for automatic class resolution. |
-
-
-
-```
-srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_video_pipeline.py \
-    --dataset swept_sine \
-    --mode separate \
-    --keypoint-labels-csv data/labels/swept_sine_true_labels.csv \
-    --epochs 20 --batch-size 32 --k-steps 20 \
-    --ode-training-mode subsequence \
-    --ode-epochs 500 \
-    --run-name swept_sine_separate_windowed \
-    --frame-height 96 --frame-width 96 \
-    --ode-use-encoder-labels
-
-srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_video_pipeline.py \
-    --dataset multisine_05 \
-    --mode separate \
-    --keypoint-labels-csv data/labels/multisine_05_true_labels.csv \
-    --epochs 20 --batch-size 32 --k-steps 20 \
-    --ode-training-mode subsequence \
-    --ode-epochs 500 \
-    --run-name multisine_05_separate_windowed \
-    --frame-height 96 --frame-width 96 \
-    --ode-use-encoder-labels
-
-.venv/bin/python examples/run_bab_video_pipeline.py \
-  --dataset swept_sine \
-  --mode ode_retrain \
-  --encoder-checkpoint results/swept_sine_separate_windowed_20260312_172115/encoder_best.pt \
-  --ode-use-encoder-labels \
-  --ode-model linear_physics \
-  --ode-training-mode subsequence \
-  --ode-epochs 1000 \
-  --ode-lr 1e-6 \
-  --run-name swept_sine_ode_retrain_from_sep_windowed
-
-.venv/bin/python examples/run_bab_video_pipeline.py \
-  --dataset swept_sine \
-  --mode ode_retrain \
-  --encoder-checkpoint results/swept_sine_separate_windowed_20260312_172115/encoder_best.pt \
-  --ode-model linear_physics \
-  --ode-training-mode subsequence \
-  --ode-epochs 1000 \
-  --ode-lr 1e-4 \
-  --k-steps 50 \
-  --run-name swept_sine_ode_retrain_linear_k50_uplot
-
-```
+See the repository for license details.
