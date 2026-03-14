@@ -554,20 +554,20 @@ For the built-in BAB datasets:
 - advanced ODE options such as `ode_training_mode` now live in
   `BabVideoPipelineConfig` instead of the CLI.
 
-srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_video_pipeline.py \
+srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_pipeline.py \
     --dataset swept_sine \
     --mode separate \
     --ode-model linear_physics \
     --epochs 20 --batch-size 32 --k-steps 20 \
     --run-name swept_sine_separate_windowed
 
-srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_video_pipeline.py \
+srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_pipeline.py \
     --dataset multisine_05 \
     --mode separate \
     --epochs 20 --batch-size 32 --k-steps 20 \
     --run-name multisine_05_separate_windowed
 
-.venv/bin/python examples/run_bab_video_pipeline.py \
+.venv/bin/python examples/run_pipeline.py \
   --dataset swept_sine \
   --mode ode_retrain \
   --encoder-checkpoint results/swept_sine_separate_windowed_20260312_172115/encoder_best.pt \
@@ -575,7 +575,7 @@ srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_bab_v
   --epochs 1000 \
   --run-name swept_sine_ode_retrain_from_sep_windowed
 
-.venv/bin/python examples/run_bab_video_pipeline.py \
+.venv/bin/python examples/run_pipeline.py \
   --dataset swept_sine \
   --mode ode_retrain \
   --encoder-checkpoint results/swept_sine_separate_windowed_20260312_172115/encoder_best.pt \

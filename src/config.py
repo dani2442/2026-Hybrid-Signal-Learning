@@ -348,10 +348,11 @@ BAB_VIDEO_PIPELINE_MODES = (
     "encoder_only",
     "decoder_only",
     "enc_ode",
-    "ode_dec",
     "enc_ode_dec",
+    "ode_dec",
     "separate",
     "ode_retrain",
+    "enc_dec",
 )
 
 BAB_VIDEO_ENCODERS = ("theta_regression", "pose_heatmap")

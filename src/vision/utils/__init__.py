@@ -1,26 +1,18 @@
 """Vision utilities: sync/alignment and image transforms.
 
-Most dataset/label/registry helpers now live in ``src.data``.  This module
+Most dataset/label/registry helpers now live in ``src.data``. This package
 re-exports them for backward compatibility and adds vision-specific helpers
-(frame normalisation, heatmap decoding, theta alignment).
+(frame normalisation and theta alignment).
 """
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 
-# ─────────────────────────────────────────────────────────────────────
-# Re-exports from src.data  (backward-compatible public names)
-# ─────────────────────────────────────────────────────────────────────
-from ..data.registry import (                       # noqa: F401
-    DATASET_VIDEO_MAP,
-    VIDEO_LED_FRAME_MAP,
-    resolve_led_frame,
-    resolve_video_name,
-)
-from ..data.labels import (                         # noqa: F401
+# Re-export data helpers under the historical ``src.vision.utils`` API.
+from ...data.labels import (  # noqa: F401
     KEYPOINT_COLUMN_LABELS,
     SENSOR_STATE_LABELS,
     interpolate_missing_keypoints,
@@ -28,11 +20,13 @@ from ..data.labels import (                         # noqa: F401
     load_theta_csv,
     parse_keypoint_labels_csv,
 )
+from ...data.registry import (  # noqa: F401
+    DATASET_VIDEO_MAP,
+    VIDEO_LED_FRAME_MAP,
+    resolve_led_frame,
+    resolve_video_name,
+)
 
-
-# ─────────────────────────────────────────────────────────────────────
-# Frame ↔ sensor alignment
-# ─────────────────────────────────────────────────────────────────────
 
 def build_frame_index_map(
     n_sensor_samples: int,
@@ -41,33 +35,11 @@ def build_frame_index_map(
     n_video_frames: int,
     frame_start: int = 0,
 ) -> np.ndarray:
-    """Build a mapping from sensor sample index → nearest video frame index.
-
-    Parameters
-    ----------
-    n_sensor_samples:
-        Number of samples in the (cropped/resampled) sensor series.
-    sensor_dt:
-        Sampling period of the sensor series (seconds).
-    video_fps:
-        Video frame rate after sync (Hz).
-    n_video_frames:
-        Total number of synced video frames available.
-
-    Returns
-    -------
-    np.ndarray
-        Integer array of shape ``(n_sensor_samples,)`` where entry *i*
-        is the nearest video frame index for sensor sample *i*.
-    """
+    """Build a mapping from sensor sample index to the nearest video frame."""
     sensor_times = np.arange(n_sensor_samples) * sensor_dt
     frame_indices = np.round(sensor_times * video_fps).astype(int) + int(frame_start)
     return np.clip(frame_indices, 0, n_video_frames - 1)
 
-
-# ─────────────────────────────────────────────────────────────────────
-# Image normalisation helpers
-# ─────────────────────────────────────────────────────────────────────
 
 # ImageNet statistics used by torchvision pretrained models.
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -79,25 +51,12 @@ def normalize_frame(
     mean: Tuple[float, ...] = IMAGENET_MEAN,
     std: Tuple[float, ...] = IMAGENET_STD,
 ) -> np.ndarray:
-    """Convert a uint8 HWC frame to float32 CHW with ImageNet normalisation.
-
-    Parameters
-    ----------
-    frame:
-        ``(H, W, 3)`` uint8 array.
-    mean, std:
-        Per-channel normalisation statistics.
-
-    Returns
-    -------
-    np.ndarray
-        ``(3, H, W)`` float32 tensor-ready array.
-    """
+    """Convert a uint8 HWC frame to float32 CHW with ImageNet normalisation."""
     img = frame.astype(np.float32) / 255.0
     mean_arr = np.array(mean, dtype=np.float32).reshape(1, 1, 3)
     std_arr = np.array(std, dtype=np.float32).reshape(1, 1, 3)
     img = (img - mean_arr) / std_arr
-    return img.transpose(2, 0, 1)  # HWC → CHW
+    return img.transpose(2, 0, 1)
 
 
 def align_and_calibrate_theta(
@@ -113,7 +72,7 @@ def align_and_calibrate_theta(
     calibrate_scale: bool = True,
     min_overlap: int = 200,
 ) -> Dict[str, np.ndarray | float | int]:
-    """Align video theta to sensor theta via offset/sign and optional linear calibration."""
+    """Align video theta to sensor theta via offset/sign and optional calibration."""
     sensor_t = np.asarray(sensor_t, dtype=float)
     sensor_theta = np.asarray(sensor_theta, dtype=float)
     video_t = np.asarray(video_t, dtype=float)
@@ -173,20 +132,12 @@ def align_and_calibrate_theta(
         in_range = (sensor_t >= tt[0]) & (sensor_t <= tt[-1])
         sensor_theta_from_video[in_range] = np.interp(sensor_t[in_range], tt, yy)
 
-    # Also build a sparse version that has values only at sensor time-steps
-    # nearest to the actual (non-interpolated) video label instants.
     sensor_theta_from_video_sparse = np.full_like(sensor_theta, np.nan, dtype=float)
     if np.any(valid):
         for t_v, y_v in zip(tt, yy):
             idx = int(np.argmin(np.abs(sensor_t - t_v)))
             sensor_theta_from_video_sparse[idx] = y_v
 
-    # --- Compute quality metrics at the *actual* data points -----------
-    # For sparse video data, computing metrics after dense interpolation
-    # onto the sensor grid is misleading (linear interp can't reconstruct
-    # high-frequency content between sparse points).  Instead, compare
-    # the calibrated video values at the original sparse time-points
-    # against the sensor signal interpolated to those same instants.
     cal_overlap = overlap & np.isfinite(theta_cal)
     point_corr = np.nan
     point_rmse = np.nan
@@ -196,16 +147,17 @@ def align_and_calibrate_theta(
         point_corr = float(np.corrcoef(sensor_at_pts, video_at_pts)[0, 1])
         point_rmse = float(np.sqrt(np.mean((sensor_at_pts - video_at_pts) ** 2)))
 
-    # Also provide grid-interpolated metrics (useful when video is dense).
     metrics_mask = np.isfinite(sensor_theta_from_video) & np.isfinite(sensor_theta)
     grid_corr = np.nan
     grid_rmse = np.nan
     if np.sum(metrics_mask) > 2:
-        grid_corr = float(np.corrcoef(sensor_theta[metrics_mask], sensor_theta_from_video[metrics_mask])[0, 1])
-        grid_rmse = float(np.sqrt(np.mean((sensor_theta[metrics_mask] - sensor_theta_from_video[metrics_mask]) ** 2)))
+        grid_corr = float(
+            np.corrcoef(sensor_theta[metrics_mask], sensor_theta_from_video[metrics_mask])[0, 1]
+        )
+        grid_rmse = float(
+            np.sqrt(np.mean((sensor_theta[metrics_mask] - sensor_theta_from_video[metrics_mask]) ** 2))
+        )
 
-    # Report point-wise metrics as the primary figures; they are always
-    # meaningful regardless of data density.
     return {
         "offset_s": float(best_offset),
         "sign": int(best_sign),
@@ -245,17 +197,15 @@ def _search_offset(
             min_overlap=min_overlap,
         )
 
-    # --- Coarse grid search (always run) --------------------------------
     span = float(offset_max_s) - float(offset_min_s)
-    n_grid = max(41, int(span / 0.05) + 1)  # ~0.05 s resolution
+    n_grid = max(41, int(span / 0.05) + 1)
     candidates = np.linspace(float(offset_min_s), float(offset_max_s), n_grid)
     corr_vals = np.array([-_neg_corr(float(c)) for c in candidates])
     best_grid_idx = int(np.nanargmax(corr_vals))
     best_off = float(candidates[best_grid_idx])
     best_corr = float(corr_vals[best_grid_idx])
 
-    # --- Refine around the best grid point with Brent -------------------
-    half = span / n_grid  # one grid step
+    half = span / n_grid
     lo = max(float(offset_min_s), best_off - 3 * half)
     hi = min(float(offset_max_s), best_off + 3 * half)
     res = minimize_scalar(
@@ -293,3 +243,4 @@ def _corr_for_offset(
     if np.std(sensor_interp) < 1e-12 or np.std(yy) < 1e-12:
         return -np.inf
     return float(np.corrcoef(sensor_interp, yy)[0, 1])
+
