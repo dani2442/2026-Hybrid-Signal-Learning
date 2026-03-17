@@ -409,8 +409,11 @@ def evaluate_and_plot_ode_free_run(
     run_dir: Path,
     *,
     use_sensor_y_dot: bool = False,
+    encoder=None,
+    frame_dataset=None,
+    device: str = "auto",
 ) -> dict[str, object]:
-    """Evaluate a free-running ODE model and save the standard trajectory plot."""
+    """Evaluate a free-running ODE model and save trajectory plots."""
     from src.validation.metrics import Metrics
     from src.visualization.pipeline_plots import plot_sensor_to_future_sensor_freerun_full
 
@@ -456,7 +459,58 @@ def evaluate_and_plot_ode_free_run(
         theta_dot_true=theta_dot_true_full,
         theta_dot_pred=theta_dot_pred_full,
     )
-    return {"metrics": metrics}
+
+    result: dict[str, object] = {"metrics": metrics}
+    if encoder is not None and frame_dataset is not None:
+        theta_video = _predict_encoder_theta_series(
+            encoder,
+            frame_dataset,
+            len(y_all),
+            device=device,
+        )
+        theta_dot_video = np.gradient(theta_video, dt) if len(theta_video) > 1 else np.zeros_like(theta_video)
+        y_true_video, y_pred_video, theta_dot_true_video, theta_dot_pred_video = _free_run_segment(
+            ode_model,
+            u_all,
+            y_all,
+            y_dot_all,
+            dt,
+            use_sensor_y_dot=False,
+            initial_theta=float(theta_video[0]),
+            initial_theta_dot=float(theta_dot_video[0]),
+        )
+        plot_sensor_to_future_sensor_freerun_full(
+            run_dir / "plot_video_to_sensor_to_future_sensor_freerun.png",
+            t_all[: len(y_true_video)],
+            y_true_video,
+            y_pred_video,
+            u=u_all[: len(y_true_video)],
+            theta_dot_true=theta_dot_true_video,
+            theta_dot_pred=theta_dot_pred_video,
+            title="Video -> Sensor -> Future Sensor (NeuralODE, free-run simulation)",
+            theta_pred_label="pred theta (video->sensor->future sensor)",
+            theta_dot_pred_label="pred theta_dot (video->sensor->future sensor)",
+        )
+
+        valid_test_idx = np.asarray(test_idx, dtype=int)
+        valid_test_idx = valid_test_idx[valid_test_idx < len(y_true_video)]
+        if len(valid_test_idx) > 0:
+            video_metrics = {
+                "rmse_theta": Metrics.rmse(y_true_video[valid_test_idx], y_pred_video[valid_test_idx]),
+                "mae_theta": Metrics.mae(y_true_video[valid_test_idx], y_pred_video[valid_test_idx]),
+                "r2_theta": Metrics.r2(y_true_video[valid_test_idx], y_pred_video[valid_test_idx]),
+                "fit_theta": Metrics.fit_percent(y_true_video[valid_test_idx], y_pred_video[valid_test_idx]),
+                "rmse_theta_dot": Metrics.rmse(
+                    theta_dot_true_video[valid_test_idx],
+                    theta_dot_pred_video[valid_test_idx],
+                ),
+            }
+            save_metrics_csv(
+                video_metrics,
+                run_dir / "metrics_video_to_sensor_to_future_sensor.csv",
+            )
+            result["video_chain_metrics"] = video_metrics
+    return result
 
 
 def load_ode_func(config):
@@ -584,10 +638,19 @@ def _free_run_segment(
     dt: float,
     *,
     use_sensor_y_dot: bool,
+    initial_theta: float | None = None,
+    initial_theta_dot: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     theta = np.asarray(theta, dtype=float)
     theta_dot = _maybe_array(theta_dot)
-    init = prepare_ode_initial_segment(theta, theta_dot if use_sensor_y_dot else None, dt)
+    init_theta = theta if initial_theta is None else np.asarray([initial_theta], dtype=float)
+    if initial_theta_dot is not None:
+        init_theta_dot = np.asarray([initial_theta_dot], dtype=float)
+    elif use_sensor_y_dot:
+        init_theta_dot = theta_dot
+    else:
+        init_theta_dot = None
+    init = prepare_ode_initial_segment(init_theta, init_theta_dot, dt)
     pred_theta, pred_theta_dot = _split_rollout_state(
         np.asarray(ode_model.predict_free_run(u, init, return_full_state=True), dtype=float),
         dt,
@@ -599,6 +662,21 @@ def _free_run_segment(
         else np.asarray(theta_dot[:n], dtype=float)
     )
     return theta[:n], pred_theta[:n], true_theta_dot, pred_theta_dot[:n]
+
+
+def _predict_encoder_theta_series(
+    encoder,
+    frame_dataset,
+    n_samples: int,
+    *,
+    device: str = "auto",
+) -> np.ndarray:
+    pred = predict_encoder_framewise(encoder, frame_dataset, device=device)
+    theta = np.full(int(n_samples), np.nan, dtype=float)
+    theta[pred["idx"]] = pred["pred"][:, 0]
+    if np.any(~np.isfinite(theta)):
+        raise ValueError("Encoder predictions are missing for some sensor samples.")
+    return theta
 
 
 def _ode_learning_rate(config) -> float | None:

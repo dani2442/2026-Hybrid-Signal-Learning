@@ -342,6 +342,8 @@ class EncOdeDecConfig(BaseConfig):
     frame_width: int = 224
     video_fps: float = 30.0
     resample_factor: int = 50
+    training_mode: str = "subsequence"
+    steps_per_epoch: Optional[int] = None
 
 
 BAB_VIDEO_PIPELINE_MODES = (
@@ -358,6 +360,8 @@ BAB_VIDEO_PIPELINE_MODES = (
 BAB_VIDEO_ENCODERS = ("theta_regression", "pose_heatmap")
 
 BAB_VIDEO_ODE_MODELS = ("linear_physics", "structured_node", "stribeck_physics")
+
+BAB_VIDEO_TRAINING_MODES = ("full", "subsequence")
 
 
 @dataclass
@@ -398,6 +402,8 @@ class BabVideoPipelineConfig:
     alignment_offset_max_s: float = 12.0
     freeze_ode_epochs: int = 0
     ode_hidden_dim: int = 128
+    joint_training_mode: str = "subsequence"
+    joint_steps_per_epoch: Optional[int] = None
     seed: int = 42
     device: str = "auto"
     plot_count: int = 6

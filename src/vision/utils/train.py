@@ -159,6 +159,11 @@ def _run_enc_ode_common(
     )
     train_ds, val_ds, test_ds = seq_ds.split()
     print(f"Sequence splits: {len(train_ds)} train / {len(val_ds)} val / {len(test_ds)} test")
+    print(
+        "Joint training mode: "
+        f"{config.joint_training_mode} "
+        f"(steps_per_epoch={config.joint_steps_per_epoch})"
+    )
 
     ode_func = load_ode_func(config)
     decoder = DecoderKeypointsMLP() if with_decoder else None
@@ -179,6 +184,8 @@ def _run_enc_ode_common(
         device=config.device,
         seed=config.seed,
         freeze_ode_epochs=config.freeze_ode_epochs,
+        training_mode=config.joint_training_mode,
+        steps_per_epoch=config.joint_steps_per_epoch,
         wandb_project=config.wandb_project,
         wandb_run_name=f"{config.mode}_{config.dataset}",
         checkpoint_dir=str(run_dir),
@@ -329,6 +336,9 @@ def _run_separate(config, encoder, data, frames, frame_idx_map, aux, run_dir) ->
         te,
         run_dir,
         use_sensor_y_dot=config.ode_init_from_y_dot,
+        encoder=encoder,
+        frame_dataset=frame_ds,
+        device=config.device,
     )
     ode_metrics = ode_eval["metrics"]
 
@@ -355,6 +365,8 @@ def _run_separate(config, encoder, data, frames, frame_idx_map, aux, run_dir) ->
     )
     print("Video->sensor metrics:", enc_metrics)
     print("Sensor->future sensor (free-run) metrics:", ode_metrics)
+    if "video_chain_metrics" in ode_eval:
+        print("Video->sensor->future sensor metrics:", ode_eval["video_chain_metrics"])
     print("Sensor->video metrics:", dec_metrics)
 
 

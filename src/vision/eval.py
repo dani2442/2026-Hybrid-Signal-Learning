@@ -108,6 +108,11 @@ def evaluate_ode_rollout(
     """
     dev = resolve_device(device)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    control_series = torch.tensor(
+        np.asarray(dataset.data.u, dtype=np.float32).reshape(-1, 1),
+        dtype=torch.float32,
+        device=dev,
+    )
 
     # Determine rollout callable
     from .models import EncOdeDecModel
@@ -121,8 +126,31 @@ def evaluate_ode_rollout(
         ode_func = ode_model.to(dev).eval()
         ode_dt = getattr(ode_model, "dt", 0.05)
 
-        def rollout_fn(x0, u_seq, k_steps):
+        def rollout_fn(x0, u_seq, k_steps, *, control_series=None, start_idx=None):
             t_eval = torch.arange(k_steps, dtype=x0.dtype, device=dev) * ode_dt
+            if start_idx is not None:
+                ode_func.u_series = control_series
+                ode_func.t_series = (
+                    torch.arange(
+                        control_series.shape[0],
+                        dtype=x0.dtype,
+                        device=dev,
+                    )
+                    * ode_dt
+                )
+                ode_func.batch_start_times = start_idx.to(
+                    device=dev,
+                    dtype=x0.dtype,
+                ).reshape(-1, 1) * ode_dt
+                x = x0.clone()
+                traj = [x]
+                for step in range(1, k_steps):
+                    dx = ode_func.f(t_eval[step - 1], x)
+                    x = x + dx * ode_dt
+                    traj.append(x)
+                ode_func.batch_start_times = None
+                return torch.stack(traj, dim=0)
+
             if u_seq.ndim == 2:
                 ode_func.u_series = u_seq.to(dev)
                 ode_func.t_series = t_eval
@@ -162,6 +190,7 @@ def evaluate_ode_rollout(
         for batch in loader:
             u_seq = batch["u_seq"].to(dev)
             x_seq = batch["x_seq"].to(dev)  # (B, K, 2)
+            start_idx = batch["start_idx"].to(dev)
             K = x_seq.shape[1]
 
             if init_from == "encoder":
@@ -177,7 +206,13 @@ def evaluate_ode_rollout(
             else:
                 x0 = x_seq[:, 0, :]  # (B, 2)
 
-            x_hat = rollout_fn(x0, u_seq, K)  # (K, B, 2)
+            x_hat = rollout_fn(
+                x0,
+                u_seq,
+                K,
+                control_series=control_series,
+                start_idx=start_idx,
+            )  # (K, B, 2)
             # Convert to (B, K, 2) for comparison
             x_hat_np = x_hat.permute(1, 0, 2).cpu().numpy()
             x_true_np = x_seq.cpu().numpy()
@@ -297,6 +332,11 @@ def evaluate_end2end(
     enc_ode_dec = enc_ode_dec.to(dev).eval()
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    control_series = torch.tensor(
+        np.asarray(dataset.data.u, dtype=np.float32).reshape(-1, 1),
+        dtype=torch.float32,
+        device=dev,
+    )
 
     all_pred_x: list[np.ndarray] = []
     all_true_x: list[np.ndarray] = []
@@ -310,9 +350,17 @@ def evaluate_end2end(
             y_prev = batch["y_prev"].to(dev)
             u_seq = batch["u_seq"].to(dev)
             x_seq = batch["x_seq"].to(dev)
+            start_idx = batch["start_idx"].to(dev)
             K = x_seq.shape[1]
 
-            outputs = enc_ode_dec(y0, u_seq, K, y_prev=y_prev)
+            outputs = enc_ode_dec(
+                y0,
+                u_seq,
+                K,
+                y_prev=y_prev,
+                control_series=control_series,
+                start_idx=start_idx,
+            )
             x_hat = outputs["x_seq_hat"].permute(1, 0, 2).cpu().numpy()  # (B, K, 2)
             all_pred_x.append(x_hat.reshape(-1, 2))
             all_true_x.append(x_seq.cpu().numpy().reshape(-1, 2))

@@ -1,18 +1,10 @@
-"""Vision models: encoder, decoders, pose estimator, and end-to-end wrapper.
+"""Vision models: encoder, decoders, and the end-to-end wrapper.
 
 Encoder A  — ``EncoderThetaNet``: ResNet-50 backbone → θ (position only).
 Encoder B  — ``PoseResNet50``:    ResNet-50 + deconv head → heatmaps → keypoints → θ.
 Decoder    — ``DecoderKeypointsMLP``: [θ, θ̇] state → keypoint coordinates.
 Decoder    — ``DecoderFrameDeconv``: [θ, θ̇] state → RGB image (transpose conv).
-Composite  — ``EncOdeDecModel``:  encoder(θ) + finite-diff(θ̇) + ODE dynamics + optional decoder.
-
-Pipeline flow::
-
-    image_t  →  Encoder  →  θ_t
-    image_{t-1}  →  Encoder  →  θ_{t-1}
-    θ̇_t = (θ_t − θ_{t-1}) / dt          (finite differences)
-    [θ_t, θ̇_t]  →  NeuralODE  →  [θ, θ̇] trajectory
-    [θ, θ̇]      →  Decoder   →  image / keypoints
+Composite  — ``EncOdeDecModel``: encoder + finite-difference init + ODE dynamics + optional decoder.
 """
 
 from __future__ import annotations
@@ -54,9 +46,9 @@ class EncoderThetaNet(nn.Module):
         self.features = nn.Sequential(*list(backbone.children())[:-1])  # → (B, 2048, 1, 1)
         self.head = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(2048, 256),
+            nn.Linear(2048, 16),
             nn.ReLU(inplace=True),
-            nn.Linear(256, state_dim),
+            nn.Linear(16, state_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -225,18 +217,12 @@ class DecoderFrameDeconv(nn.Module):
 # ═══════════════════════════════════════════════════════════════════════
 
 class EncOdeDecModel(nn.Module):
-    """Composite model: image → θ → finite-diff θ̇ → ODE rollout → (optional) observation.
+    """Composite model: image pair → finite-difference init → ODE rollout → observation.
 
     This module composes an encoder, an ODE dynamics model (from the main
-    library), and an optional decoder.  The encoder maps a single image
-    to a scalar position ``θ``.  The velocity ``θ̇`` is obtained from
-    finite differences of two consecutive encoder outputs::
-
-        θ̇₀ = (θ₀ − θ₋₁) / dt
-
-    The resulting ``[θ, θ̇]`` initial state is then integrated by the ODE
-    dynamics and optionally decoded to observations.  Gradients flow
-    end-to-end through ``encoder → finite-diff → odeint → decoder``.
+    library), and an optional decoder.  The initial state ``[θ, θ̇]`` is
+    built from two consecutive frames with finite differences and then
+    integrated by the ODE dynamics before optional decoding.
 
     Parameters
     ----------
@@ -289,16 +275,19 @@ class EncOdeDecModel(nn.Module):
             Initial state ``(B, 2)`` as ``[θ, θ̇]`` where
             ``θ̇ = (θ₀ − θ₋₁) / dt``.
         """
-        theta_0 = self.encoder(y0)        # (B, 1)
-        theta_prev = self.encoder(y_prev)  # (B, 1)
+        theta_0 = self.encoder(y0)
+        theta_prev = self.encoder(y_prev)
         theta_dot_0 = (theta_0 - theta_prev) / self.dt
-        return torch.cat([theta_0, theta_dot_0], dim=-1)  # (B, 2)
+        return torch.cat([theta_0, theta_dot_0], dim=-1)
 
     def rollout(
         self,
         x0: torch.Tensor,
         u_seq: torch.Tensor,
         k_steps: int,
+        *,
+        control_series: Optional[torch.Tensor] = None,
+        start_idx: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Integrate ODE dynamics from ``x0`` for ``k_steps``.
 
@@ -310,6 +299,11 @@ class EncOdeDecModel(nn.Module):
             Control inputs ``(B, K, 1)`` or ``(K, 1)`` (broadcast).
         k_steps:
             Number of integration steps.
+        control_series:
+            Optional full control trajectory ``(N, 1)`` for batched subsequence
+            rollout from a shared absolute timeline.
+        start_idx:
+            Optional batch start indices into ``control_series``.
 
         Returns
         -------
@@ -318,6 +312,36 @@ class EncOdeDecModel(nn.Module):
         """
         device = x0.device
         t_eval = torch.arange(k_steps, dtype=x0.dtype, device=device) * self.dt
+
+        if control_series is not None and start_idx is not None:
+            control_series = control_series.to(device)
+            if control_series.ndim == 1:
+                control_series = control_series.reshape(-1, 1)
+            start_idx = start_idx.to(device=device, dtype=x0.dtype).reshape(-1, 1)
+            if start_idx.shape[0] != x0.shape[0]:
+                raise ValueError(
+                    f"Batch mismatch: x0 has B={x0.shape[0]}, start_idx has B={start_idx.shape[0]}"
+                )
+            self.ode_func.u_series = control_series
+            self.ode_func.t_series = (
+                torch.arange(
+                    control_series.shape[0],
+                    dtype=x0.dtype,
+                    device=device,
+                )
+                * self.dt
+            )
+            self.ode_func.batch_start_times = start_idx * self.dt
+
+            x = x0
+            trajectory = [x]
+            for step in range(1, k_steps):
+                dx = self.ode_func.f(t_eval[step - 1], x)
+                x = x + dx * self.dt
+                trajectory.append(x)
+            self.ode_func.batch_start_times = None
+            return torch.stack(trajectory, dim=0)
+
         # ``u_seq`` can be shared ``(K, 1)`` or per-sample ``(B, K, 1)``.
         # For per-sample controls we integrate each sample separately so every
         # batch element sees its own control path.
@@ -394,9 +418,11 @@ class EncOdeDecModel(nn.Module):
         k_steps: int,
         *,
         y_prev: Optional[torch.Tensor] = None,
+        control_series: Optional[torch.Tensor] = None,
+        start_idx: Optional[torch.Tensor] = None,
         return_states: bool = True,
     ) -> Dict[str, torch.Tensor]:
-        """Full forward: encode pair → finite-diff → rollout → (optional) decode.
+        """Full forward: encode pair → finite-diff init → rollout → decode.
 
         Parameters
         ----------
@@ -407,8 +433,13 @@ class EncOdeDecModel(nn.Module):
         k_steps:
             Number of ODE integration steps.
         y_prev:
-            Previous frame ``(B, 3, H, W)`` for finite-difference velocity.
-            If *None*, falls back to using ``y0`` for both (θ̇₀ = 0).
+            Previous frame ``(B, 3, H, W)`` for finite-difference initial velocity.
+            If *None*, falls back to using ``y0`` for both.
+        control_series:
+            Optional full control trajectory used with ``start_idx`` for
+            batched subsequence rollout.
+        start_idx:
+            Optional batch start indices into ``control_series``.
 
         Returns a dict with keys:
           - ``"x0_hat"``: initial state ``(B, 2)`` as ``[θ, θ̇]``.
@@ -418,7 +449,13 @@ class EncOdeDecModel(nn.Module):
         if y_prev is None:
             y_prev = y0
         x0_hat = self.encode_initial_state(y0, y_prev)
-        x_seq_hat = self.rollout(x0_hat, u_seq, k_steps)
+        x_seq_hat = self.rollout(
+            x0_hat,
+            u_seq,
+            k_steps,
+            control_series=control_series,
+            start_idx=start_idx,
+        )
         out: Dict[str, torch.Tensor] = {
             "x0_hat": x0_hat,
             "x_seq_hat": x_seq_hat,

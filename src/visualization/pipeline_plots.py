@@ -103,6 +103,9 @@ def plot_sensor_to_future_sensor_freerun_full(
     u: Optional[np.ndarray] = None,
     theta_dot_true: Optional[np.ndarray] = None,
     theta_dot_pred: Optional[np.ndarray] = None,
+    title: str = "Sensor -> Future Sensor (NeuralODE, free-run simulation)",
+    theta_pred_label: str = "pred theta (free-run)",
+    theta_dot_pred_label: str = "pred theta_dot (free-run)",
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -120,14 +123,20 @@ def plot_sensor_to_future_sensor_freerun_full(
         lower_ax = axes[1]
 
     theta_ax.plot(t, theta_true, label="true theta", linewidth=1.0)
-    theta_ax.plot(t, theta_pred, label="pred theta (free-run)", linewidth=1.0, linestyle="--")
+    theta_ax.plot(t, theta_pred, label=theta_pred_label, linewidth=1.0, linestyle="--")
     theta_ax.set_ylabel("theta [deg]")
     theta_ax.grid(True, alpha=0.3)
     theta_ax.legend()
 
     if theta_dot_true is not None and theta_dot_pred is not None:
         lower_ax.plot(t, theta_dot_true, label="true theta_dot", linewidth=1.0)
-        lower_ax.plot(t, theta_dot_pred, label="pred theta_dot (free-run)", linewidth=1.0, linestyle="--")
+        lower_ax.plot(
+            t,
+            theta_dot_pred,
+            label=theta_dot_pred_label,
+            linewidth=1.0,
+            linestyle="--",
+        )
         lower_ax.set_ylabel("theta_dot")
     else:
         resid = theta_true - theta_pred
@@ -137,7 +146,7 @@ def plot_sensor_to_future_sensor_freerun_full(
     lower_ax.grid(True, alpha=0.3)
     lower_ax.legend()
 
-    fig.suptitle("Sensor -> Future Sensor (NeuralODE, free-run simulation)")
+    fig.suptitle(title)
     fig.tight_layout()
     fig.savefig(out_path, dpi=180)
     plt.close(fig)

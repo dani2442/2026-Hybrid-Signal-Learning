@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, RandomSampler
 from tqdm.auto import tqdm
 
 from ..logging import WandbLogger
@@ -429,6 +429,8 @@ def train_end_to_end(
     seed: Optional[int] = None,
     grad_clip: float = DEFAULT_GRAD_CLIP,
     freeze_ode_epochs: int = 0,
+    training_mode: str = "subsequence",
+    steps_per_epoch: Optional[int] = None,
     wandb_project: Optional[str] = None,
     wandb_run_name: Optional[str] = None,
     checkpoint_dir: Optional[str] = None,
@@ -451,6 +453,13 @@ def train_end_to_end(
     freeze_ode_epochs:
         Number of initial epochs where ODE parameters are frozen (train
         encoder only to match ODE expectations).
+    training_mode:
+        ``"full"`` iterates over every window in ``train_dataset`` each
+        epoch; ``"subsequence"`` samples random window batches.
+    steps_per_epoch:
+        Number of sampled training batches per epoch when
+        ``training_mode="subsequence"``.  When *None*, defaults to the
+        smaller of the full-pass batch count and ``64``.
     wandb_project, wandb_run_name:
         W&B logging.
     checkpoint_dir:
@@ -466,14 +475,24 @@ def train_end_to_end(
     dev = resolve_device(device)
     enc_ode_dec = enc_ode_dec.to(dev)
 
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, drop_last=True,
+    train_loader = _build_sequence_loader(
+        train_dataset,
+        batch_size=batch_size,
+        training_mode=training_mode,
+        steps_per_epoch=steps_per_epoch,
+        shuffle=True,
     )
     val_loader = None
     if val_dataset is not None and len(val_dataset) > 0:
-        val_loader = DataLoader(
-            val_dataset, batch_size=batch_size, shuffle=False,
+        val_loader = _build_sequence_loader(
+            val_dataset,
+            batch_size=batch_size,
+            training_mode="full",
+            steps_per_epoch=None,
+            shuffle=False,
         )
+    train_control_series = _full_control_series(train_dataset, dev)
+    val_control_series = _full_control_series(val_dataset, dev) if val_loader is not None else None
 
     optimizer = optim.Adam(enc_ode_dec.parameters(), lr=lr)
     logger = WandbLogger(project=wandb_project, run_name=wandb_run_name)
@@ -502,10 +521,18 @@ def train_end_to_end(
             y_prev = batch["y_prev"].to(dev)
             u_seq = batch["u_seq"].to(dev)
             x_seq = batch["x_seq"].to(dev)
+            start_idx = batch["start_idx"].to(dev)
             K = x_seq.shape[1]
 
             optimizer.zero_grad()
-            outputs = enc_ode_dec(y0, u_seq, K, y_prev=y_prev)
+            outputs = enc_ode_dec(
+                y0,
+                u_seq,
+                K,
+                y_prev=y_prev,
+                control_series=train_control_series,
+                start_idx=start_idx,
+            )
 
             # Build targets dict
             targets: Dict[str, torch.Tensor] = {
@@ -540,8 +567,16 @@ def train_end_to_end(
                     y_prev = batch["y_prev"].to(dev)
                     u_seq = batch["u_seq"].to(dev)
                     x_seq = batch["x_seq"].to(dev)
+                    start_idx = batch["start_idx"].to(dev)
                     K = x_seq.shape[1]
-                    outputs = enc_ode_dec(y0, u_seq, K, y_prev=y_prev)
+                    outputs = enc_ode_dec(
+                        y0,
+                        u_seq,
+                        K,
+                        y_prev=y_prev,
+                        control_series=val_control_series,
+                        start_idx=start_idx,
+                    )
                     targets = {
                         "x0": x_seq[:, 0, :],
                         "x_seq": x_seq.permute(1, 0, 2),
@@ -597,6 +632,48 @@ def _save_composite(model: "EncOdeDecModel", path: Path) -> None:
     if model.decoder is not None:
         checkpoint["decoder"] = model.decoder.state_dict()
     torch.save(checkpoint, path)
+
+
+def _build_sequence_loader(
+    dataset,
+    *,
+    batch_size: int,
+    training_mode: str,
+    steps_per_epoch: Optional[int],
+    shuffle: bool,
+):
+    if training_mode not in {"full", "subsequence"}:
+        raise ValueError(f"Unsupported training_mode: {training_mode}")
+
+    if training_mode == "full":
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=len(dataset) >= batch_size,
+        )
+
+    full_steps = max(1, int(np.ceil(len(dataset) / max(1, batch_size))))
+    effective_steps = min(64, full_steps) if steps_per_epoch is None else int(steps_per_epoch)
+    sampler = RandomSampler(
+        dataset,
+        replacement=True,
+        num_samples=max(1, effective_steps) * batch_size,
+    )
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        drop_last=True,
+    )
+
+
+def _full_control_series(dataset, device) -> torch.Tensor:
+    return torch.tensor(
+        np.asarray(dataset.data.u, dtype=np.float32).reshape(-1, 1),
+        dtype=torch.float32,
+        device=device,
+    )
 
 
 def _set_requires_grad(module: nn.Module, requires_grad: bool) -> None:

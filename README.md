@@ -545,43 +545,34 @@ loaded_model, meta = hsl.load_model_checkpoint("model.pt")
 
 
 ```
-Advanced defaults for the video pipeline now live in `src/config.py` under
-`BabVideoPipelineConfig`, so the example CLI only exposes the main run knobs.
+Most video-pipeline defaults now live in `src/config.py` under
+`BabVideoPipelineConfig`, with the CLI exposing the most common run and training-mode knobs.
 
 For the built-in BAB datasets:
 - label CSVs are auto-resolved from the registry / true-label files,
 - frame size defaults to `96x96`,
-- advanced ODE options such as `ode_training_mode` now live in
-  `BabVideoPipelineConfig` instead of the CLI.
+- additional overrides remain available in `BabVideoPipelineConfig` when needed.
 
 srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_pipeline.py \
     --dataset swept_sine \
     --mode separate \
-    --ode-model linear_physics \
-    --epochs 20 --batch-size 32 --k-steps 20 \
-    --run-name swept_sine_separate_windowed
+    --ode-model linear_physics
 
 srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_pipeline.py \
     --dataset multisine_05 \
     --mode separate \
-    --epochs 20 --batch-size 32 --k-steps 20 \
-    --run-name multisine_05_separate_windowed
+    --ode-model linear_physics
+
+.venv/bin/python examples/run_pipeline.py \
+  --dataset swept_sine \
+  --mode enc_ode \
+  --ode-model linear_physics \
+  --joint-training-mode subsequence
 
 .venv/bin/python examples/run_pipeline.py \
   --dataset swept_sine \
   --mode ode_retrain \
   --encoder-checkpoint results/swept_sine_separate_windowed_20260312_172115/encoder_best.pt \
-  --ode-model linear_physics \
-  --epochs 1000 \
-  --run-name swept_sine_ode_retrain_from_sep_windowed
-
-.venv/bin/python examples/run_pipeline.py \
-  --dataset swept_sine \
-  --mode ode_retrain \
-  --encoder-checkpoint results/swept_sine_separate_windowed_20260312_172115/encoder_best.pt \
-  --ode-model linear_physics \
-  --epochs 1000 \
-  --k-steps 50 \
-  --run-name swept_sine_ode_retrain_linear_k50_uplot
+  --ode-model linear_physics 
 
 ```
