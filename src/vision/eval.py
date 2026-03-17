@@ -198,11 +198,18 @@ def evaluate_ode_rollout(
                     raise ValueError("encoder is required when init_from='encoder'")
                 y0 = batch["y0"].to(dev)
                 y_prev = batch["y_prev"].to(dev)
-                # Encode two consecutive frames for finite-diff velocity.
-                theta_0 = encoder(y0)        # (B, 1)
-                theta_prev = encoder(y_prev)  # (B, 1)
-                theta_dot_0 = (theta_0 - theta_prev) / ode_dt
-                x0 = torch.cat([theta_0, theta_dot_0], dim=-1)  # (B, 2)
+                enc_mode = getattr(ode_model, "encoder_velocity_mode", "encoder_fd")
+                if enc_mode == "full_encoder":
+                    frame_delta = y0 - y_prev
+                    x0 = encoder(torch.cat([y0, frame_delta], dim=1))[:, :2]
+                elif enc_mode == "late_fusion":
+                    x0 = encoder(torch.cat([y0, y_prev], dim=1))[:, :2]
+                else:
+                    # Encode two consecutive frames for finite-diff velocity.
+                    theta_0 = encoder(y0)         # (B, 1)
+                    theta_prev = encoder(y_prev)  # (B, 1)
+                    theta_dot_0 = (theta_0 - theta_prev) / ode_dt
+                    x0 = torch.cat([theta_0, theta_dot_0], dim=-1)  # (B, 2)
             else:
                 x0 = x_seq[:, 0, :]  # (B, 2)
 

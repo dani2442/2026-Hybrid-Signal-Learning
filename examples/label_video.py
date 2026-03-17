@@ -199,15 +199,64 @@ def write_simple_csv(
     frame_indices: np.ndarray,
     keypoints: np.ndarray,
     fps: float = 30.0,
+    video_path: str | None = None,
 ) -> None:
     """Write a simpler CSV with columns: frame, t_s, beam_left_x, beam_left_y,
-    beam_right_x, beam_right_y, theta_deg."""
+    beam_right_x, beam_right_y, theta_deg, theta_dot_deg_s.
+
+    Velocity is computed by finite differences between consecutive frames.
+    If a consecutive neighbour is missing from the sampled set and
+    ``video_path`` is provided, the neighbour frame is auto-detected on demand.
+    """
     from src.data.labels import keypoints_to_theta
 
     path = Path(csv_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     thetas = keypoints_to_theta(keypoints[:, :2], keypoints[:, 2:4])
+
+    # Build a frame->theta map from sampled labels first.
+    theta_by_frame: dict[int, float] = {
+        int(fi): float(th) for fi, th in zip(frame_indices, thetas)
+    }
+
+    cap = cv2.VideoCapture(video_path) if video_path is not None else None
+
+    def _theta_at_frame(frame_id: int) -> float:
+        if frame_id in theta_by_frame:
+            return theta_by_frame[frame_id]
+        if cap is None or frame_id < 0:
+            return float("nan")
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_id))
+        ret, frame = cap.read()
+        if not ret:
+            return float("nan")
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        xl, yl, xr, yr = detect_beam_endpoints(gray)
+        if np.isnan(yl) or np.isnan(yr):
+            return float("nan")
+        theta = float(keypoints_to_theta(np.array([[xl, yl]]), np.array([[xr, yr]])))
+        theta_by_frame[frame_id] = theta
+        return theta
+
+    theta_dot = np.full(len(frame_indices), np.nan, dtype=float)
+    dt = 1.0 / float(fps)
+    for i, fi in enumerate(frame_indices.astype(int)):
+        th_now = float(thetas[i])
+
+        # Prefer backward difference on consecutive frames.
+        th_prev = _theta_at_frame(fi - 1)
+        if np.isfinite(th_prev):
+            theta_dot[i] = (th_now - th_prev) / dt
+            continue
+
+        # Fallback (for frame 0 or unreadable previous frame): forward diff.
+        th_next = _theta_at_frame(fi + 1)
+        if np.isfinite(th_next):
+            theta_dot[i] = (th_next - th_now) / dt
+
+    if cap is not None:
+        cap.release()
 
     with path.open("w", newline="") as f:
         w = csv.writer(f)
@@ -216,6 +265,7 @@ def write_simple_csv(
             "beam_left_x", "beam_left_y",
             "beam_right_x", "beam_right_y",
             "theta_deg",
+            "theta_dot_deg_s",
         ])
         for i, fi in enumerate(frame_indices):
             w.writerow([
@@ -226,6 +276,7 @@ def write_simple_csv(
                 f"{keypoints[i, 2]:.4f}",
                 f"{keypoints[i, 3]:.4f}",
                 f"{thetas[i]:.6f}",
+                f"{theta_dot[i]:.6f}",
             ])
 
     print(f"Wrote {len(frame_indices)} labels (simple CSV) to {path}")
@@ -350,8 +401,15 @@ def main() -> None:
     parser.add_argument("--end-frame", type=int, default=None)
     parser.add_argument("--out", default=None,
                         help="Output CSV path. Default: data/labels/<dataset>_true_labels.csv")
-    parser.add_argument("--format", choices=["dlc", "simple", "both"], default="both",
-                        help="Output format: DLC CollectedData, simple CSV, or both.")
+    parser.add_argument(
+        "--format",
+        choices=["dlc", "simple", "both"],
+        default="simple",
+        help=(
+            "Output format selector. Labels are always written to a single canonical "
+            "simple CSV at --out with theta and theta_dot."
+        ),
+    )
     parser.add_argument("--validate", action="store_true",
                         help="Validate detection against existing labels instead of labeling.")
     parser.add_argument("--montage", action="store_true", default=True,
@@ -397,10 +455,11 @@ def main() -> None:
     fps = get_video_fps(video_path)
 
     if args.format in ("dlc", "both"):
-        write_dlc_collected_csv(out_path, fi, kp, video_folder=args.dataset)
-    if args.format in ("simple", "both"):
-        simple_path = out_path.with_stem(out_path.stem + "_simple") if args.format == "both" else out_path
-        write_simple_csv(simple_path, fi, kp, fps=fps)
+        print(
+            "Note: DLC side output is disabled; writing only canonical simple CSV "
+            f"to {out_path} so theta_dot labels are preserved in one file."
+        )
+    write_simple_csv(out_path, fi, kp, fps=fps, video_path=video_path)
 
     # Diagnostic montage
     if args.montage:
@@ -414,6 +473,13 @@ def main() -> None:
     print(f"  Frames labeled: {len(fi)}")
     print(f"  Frame range: {fi[0]}–{fi[-1]}")
     print(f"  θ range: [{np.min(thetas):.2f}°, {np.max(thetas):.2f}°]")
+    if len(fi) > 0:
+        theta_dot_fd = np.full_like(thetas, np.nan, dtype=float)
+        dt = 1.0 / float(fps)
+        if len(thetas) > 1:
+            theta_dot_fd[1:] = np.diff(thetas) / dt
+            theta_dot_fd[0] = theta_dot_fd[1]
+        print(f"  θ_dot (FD) range: [{np.nanmin(theta_dot_fd):.2f}, {np.nanmax(theta_dot_fd):.2f}] deg/s")
     print(f"  beam_left_y range: [{kp[:,1].min():.1f}, {kp[:,1].max():.1f}]")
     print(f"  beam_right_y range: [{kp[:,3].min():.1f}, {kp[:,3].max():.1f}]")
 

@@ -7,6 +7,7 @@ import importlib as _importlib
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # models
     "EncoderThetaNet": (".models", "EncoderThetaNet"),
+    "EncoderThetaLateFusionNet": (".models", "EncoderThetaLateFusionNet"),
     "PoseResNet50": (".models", "PoseResNet50"),
     "DecoderKeypointsMLP": (".models", "DecoderKeypointsMLP"),
     "DecoderFrameDeconv": (".models", "DecoderFrameDeconv"),

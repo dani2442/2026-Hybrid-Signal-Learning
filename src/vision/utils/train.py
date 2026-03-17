@@ -63,7 +63,12 @@ def _run_encoder(config, encoder, data, frames, frame_idx_map, aux, run_dir) -> 
     """Train and evaluate only the image-to-sensor encoder."""
     assert encoder is not None
 
-    frame_ds = FrameStateDataset(data, frames, frame_idx_map)
+    frame_ds = FrameStateDataset(
+        data,
+        frames,
+        frame_idx_map,
+        encoder_velocity_mode=config.encoder_velocity_mode,
+    )
     train_ds, val_ds, test_ds = frame_ds.split()
     print(f"Splits: {len(train_ds)} train / {len(val_ds)} val / {len(test_ds)} test")
 
@@ -172,6 +177,7 @@ def _run_enc_ode_common(
         ode_func=ode_func,
         decoder=decoder,
         dt=_sensor_dt(data),
+        encoder_velocity_mode=config.encoder_velocity_mode,
     )
 
     result = train_end_to_end(
@@ -193,7 +199,12 @@ def _run_enc_ode_common(
     print(f"Best val loss: {result['best_val_loss']:.6f}")
 
     # Reuse the per-frame dataset for encoder metrics and plots.
-    frame_ds = FrameStateDataset(data, frames, frame_idx_map)
+    frame_ds = FrameStateDataset(
+        data,
+        frames,
+        frame_idx_map,
+        encoder_velocity_mode=config.encoder_velocity_mode,
+    )
     _, _, frame_test_ds = frame_ds.split()
     enc_metrics, _ = evaluate_and_plot_encoder(
         encoder,
@@ -288,7 +299,12 @@ def _run_separate(config, encoder, data, frames, frame_idx_map, aux, run_dir) ->
     """Train encoder, ODE, and image decoder independently, then evaluate all."""
     assert encoder is not None
 
-    frame_ds = FrameStateDataset(data, frames, frame_idx_map)
+    frame_ds = FrameStateDataset(
+        data,
+        frames,
+        frame_idx_map,
+        encoder_velocity_mode=config.encoder_velocity_mode,
+    )
     enc_train_ds, enc_val_ds, enc_test_ds = frame_ds.split()
     print(
         f"Encoder splits: {len(enc_train_ds)} train / "
@@ -390,7 +406,12 @@ def _run_ode(config, encoder, data, frames, frame_idx_map, _aux, run_dir) -> Non
         )
         encoder.eval()
 
-        frame_ds = FrameStateDataset(data, frames, frame_idx_map)
+        frame_ds = FrameStateDataset(
+            data,
+            frames,
+            frame_idx_map,
+            encoder_velocity_mode=config.encoder_velocity_mode,
+        )
         y_override = resolve_ode_training_targets(config, encoder, frame_ds, data)
 
     ode_model, _tr, _va, te = train_ode_model_separate(

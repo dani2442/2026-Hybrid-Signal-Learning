@@ -362,6 +362,7 @@ BAB_VIDEO_ENCODERS = ("theta_regression", "pose_heatmap")
 BAB_VIDEO_ODE_MODELS = ("linear_physics", "structured_node", "stribeck_physics")
 
 BAB_VIDEO_TRAINING_MODES = ("full", "subsequence")
+BAB_VIDEO_ENCODER_VELOCITY_MODES = ("encoder_fd", "full_encoder", "late_fusion")
 
 
 @dataclass
@@ -414,6 +415,7 @@ class BabVideoPipelineConfig:
     ode_batch_size: Optional[int] = 128
     ode_lr: Optional[float] = None
     pretrained: bool = True
+    encoder_velocity_mode: str = "encoder_fd"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

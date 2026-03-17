@@ -36,12 +36,43 @@ class EncoderThetaNet(nn.Module):
         Output dimensionality (default 1 for ``θ`` only).
     """
 
-    def __init__(self, pretrained: bool = True, state_dim: int = 1) -> None:
+    def __init__(
+        self,
+        pretrained: bool = True,
+        state_dim: int = 1,
+        in_channels: int = 3,
+    ) -> None:
         super().__init__()
         from torchvision.models import resnet50, ResNet50_Weights
 
         weights = ResNet50_Weights.DEFAULT if pretrained else None
         backbone = resnet50(weights=weights)
+
+        if in_channels != 3:
+            conv1_old = backbone.conv1
+            conv1_new = nn.Conv2d(
+                in_channels,
+                conv1_old.out_channels,
+                kernel_size=conv1_old.kernel_size,
+                stride=conv1_old.stride,
+                padding=conv1_old.padding,
+                bias=(conv1_old.bias is not None),
+            )
+            with torch.no_grad():
+                if pretrained:
+                    # Tile pretrained RGB filters and rescale to keep activation scale stable.
+                    repeat = (in_channels + 2) // 3
+                    w = conv1_old.weight.repeat(1, repeat, 1, 1)[:, :in_channels, :, :]
+                    w = w * (3.0 / float(in_channels))
+                    conv1_new.weight.copy_(w)
+                    if conv1_old.bias is not None:
+                        conv1_new.bias.copy_(conv1_old.bias)
+                else:
+                    nn.init.kaiming_normal_(conv1_new.weight, mode="fan_out", nonlinearity="relu")
+                    if conv1_new.bias is not None:
+                        nn.init.zeros_(conv1_new.bias)
+            backbone.conv1 = conv1_new
+
         # Remove the final FC layer; keep everything up to avgpool.
         self.features = nn.Sequential(*list(backbone.children())[:-1])  # → (B, 2048, 1, 1)
         self.head = nn.Sequential(
@@ -55,6 +86,56 @@ class EncoderThetaNet(nn.Module):
         """Map ``(B, 3, H, W)`` images to ``(B, state_dim)`` position vectors."""
         feat = self.features(x)
         return self.head(feat)
+
+
+class EncoderThetaLateFusionNet(nn.Module):
+    """Shared-backbone dual-frame encoder with late latent fusion.
+
+    Each frame is processed independently by the same ResNet backbone.
+    The two latent vectors are concatenated and mapped to state outputs,
+    typically ``[theta, theta_dot]``.
+    """
+
+    def __init__(self, pretrained: bool = True, state_dim: int = 2) -> None:
+        super().__init__()
+        from torchvision.models import ResNet50_Weights, resnet50
+
+        weights = ResNet50_Weights.DEFAULT if pretrained else None
+        backbone = resnet50(weights=weights)
+        self.features = nn.Sequential(*list(backbone.children())[:-1])
+        self.head = nn.Sequential(
+            nn.Linear(2048 * 2, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, state_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Map paired frames to state outputs.
+
+        Accepts either ``(B, 6, H, W)`` or ``(B, 2, 3, H, W)`` input.
+        """
+        if x.ndim == 5:
+            if x.shape[1] != 2 or x.shape[2] != 3:
+                raise ValueError(
+                    "Expected paired frame tensor with shape (B, 2, 3, H, W)."
+                )
+            x0 = x[:, 0]
+            x1 = x[:, 1]
+        elif x.ndim == 4:
+            if x.shape[1] != 6:
+                raise ValueError(
+                    "Late-fusion encoder expects (B, 6, H, W) when using 4D inputs."
+                )
+            x0 = x[:, :3]
+            x1 = x[:, 3:]
+        else:
+            raise ValueError(
+                f"Unsupported late-fusion input rank: {x.ndim}. Expected 4D or 5D tensor."
+            )
+
+        z0 = torch.flatten(self.features(x0), start_dim=1)
+        z1 = torch.flatten(self.features(x1), start_dim=1)
+        return self.head(torch.cat([z0, z1], dim=1))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -244,12 +325,14 @@ class EncOdeDecModel(nn.Module):
         ode_func: nn.Module,
         decoder: Optional[nn.Module] = None,
         dt: float = 0.05,
+        encoder_velocity_mode: str = "encoder_fd",
     ) -> None:
         super().__init__()
         self.encoder = encoder
         self.ode_func = ode_func
         self.decoder = decoder
         self.dt = dt
+        self.encoder_velocity_mode = encoder_velocity_mode
 
     # ── forward helpers ───────────────────────────────────────────────
 
@@ -275,6 +358,25 @@ class EncOdeDecModel(nn.Module):
             Initial state ``(B, 2)`` as ``[θ, θ̇]`` where
             ``θ̇ = (θ₀ − θ₋₁) / dt``.
         """
+        if self.encoder_velocity_mode == "full_encoder":
+            frame_delta = y0 - y_prev
+            encoder_in = torch.cat([y0, frame_delta], dim=1)
+            state = self.encoder(encoder_in)
+            if state.shape[-1] < 2:
+                raise RuntimeError(
+                    "full_encoder mode requires encoder output dim >= 2 ([theta, theta_dot])."
+                )
+            return state[:, :2]
+
+        if self.encoder_velocity_mode == "late_fusion":
+            encoder_in = torch.cat([y0, y_prev], dim=1)
+            state = self.encoder(encoder_in)
+            if state.shape[-1] < 2:
+                raise RuntimeError(
+                    "late_fusion mode requires encoder output dim >= 2 ([theta, theta_dot])."
+                )
+            return state[:, :2]
+
         theta_0 = self.encoder(y0)
         theta_prev = self.encoder(y_prev)
         theta_dot_0 = (theta_0 - theta_prev) / self.dt

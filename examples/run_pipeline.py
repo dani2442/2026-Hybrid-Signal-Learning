@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.config import (
     BAB_VIDEO_ENCODERS,
+    BAB_VIDEO_ENCODER_VELOCITY_MODES,
     BAB_VIDEO_ODE_MODELS,
     BAB_VIDEO_PIPELINE_MODES,
     BabVideoPipelineConfig,
@@ -33,6 +34,12 @@ def _build_parser(defaults: BabVideoPipelineConfig) -> argparse.ArgumentParser:
     parser.add_argument("--dataset", default=defaults.dataset, help="BAB sensor dataset key.")
     parser.add_argument("--mode", default=defaults.mode, choices=BAB_VIDEO_PIPELINE_MODES, help="Training mode.")
     parser.add_argument("--encoder", default=defaults.encoder, choices=BAB_VIDEO_ENCODERS, help="Encoder family.")
+    parser.add_argument(
+        "--encoder-velocity-mode",
+        default=defaults.encoder_velocity_mode,
+        choices=BAB_VIDEO_ENCODER_VELOCITY_MODES,
+        help="'encoder_fd': theta from current frame + finite-difference velocity; 'full_encoder': predict [theta, theta_dot] from frame pair.",
+    )
     parser.add_argument("--ode-model", default=defaults.ode_model, choices=BAB_VIDEO_ODE_MODELS, help="ODE dynamics family.")
     parser.add_argument("--wandb", default=defaults.wandb_project, help="W&B project name.")
     parser.add_argument("--run-name", default=defaults.run_name, help="Optional run name override.")
@@ -58,6 +65,7 @@ def _build_config(args) -> BabVideoPipelineConfig:
         encoder_checkpoint=args.encoder_checkpoint,
         ode_checkpoint=args.ode_checkpoint,
         ode_use_encoder_labels=args.ode_use_encoder_labels,
+        encoder_velocity_mode=args.encoder_velocity_mode,
     )
 
 
@@ -73,10 +81,31 @@ def _resolve_label_csvs(config: BabVideoPipelineConfig) -> tuple[str | None, str
 
 
 def _build_encoder(config: BabVideoPipelineConfig):
-    from src.vision.models import EncoderThetaNet, PoseResNet50
+    from src.vision.models import EncoderThetaLateFusionNet, EncoderThetaNet, PoseResNet50
+
+    if config.encoder == "pose_heatmap" and config.encoder_velocity_mode in {"full_encoder", "late_fusion"}:
+        raise ValueError(
+            "full_encoder and late_fusion are currently supported only with --encoder theta_regression"
+        )
+
+    if config.encoder_velocity_mode == "late_fusion":
+        return {
+            "theta_regression": lambda: EncoderThetaLateFusionNet(
+                pretrained=config.pretrained,
+                state_dim=2,
+            ),
+            "pose_heatmap": lambda: PoseResNet50(num_keypoints=2, pretrained=config.pretrained),
+        }[config.encoder]()
+
+    theta_state_dim = 2 if config.encoder_velocity_mode == "full_encoder" else 1
+    theta_in_channels = 6 if config.encoder_velocity_mode == "full_encoder" else 3
 
     return {
-        "theta_regression": lambda: EncoderThetaNet(pretrained=config.pretrained),
+        "theta_regression": lambda: EncoderThetaNet(
+            pretrained=config.pretrained,
+            state_dim=theta_state_dim,
+            in_channels=theta_in_channels,
+        ),
         "pose_heatmap": lambda: PoseResNet50(num_keypoints=2, pretrained=config.pretrained),
     }[config.encoder]()
 

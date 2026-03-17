@@ -236,6 +236,14 @@ def load_bab_with_video(
         "sensor_state_labels": list(SENSOR_STATE_LABELS),
     }
 
+    theta_sensor_arr = np.asarray(data.y, dtype=float)
+    sensor_dt = 1.0 / data.sampling_rate if data.sampling_rate > 0 else 1.0
+    theta_dot_fd_sensor = np.zeros_like(theta_sensor_arr)
+    if len(theta_sensor_arr) > 1:
+        theta_dot_fd_sensor[1:] = np.diff(theta_sensor_arr) / float(sensor_dt)
+        theta_dot_fd_sensor[0] = theta_dot_fd_sensor[1]
+    aux["theta_dot_sensor_fd"] = theta_dot_fd_sensor
+
     parsed_keypoints: Optional[Dict[str, np.ndarray]] = None
     if keypoint_labels_csv:
         parsed_keypoints = parse_keypoint_labels_csv(keypoint_labels_csv, fps=video_fps)
@@ -350,6 +358,15 @@ def load_bab_with_video(
         aux["theta_video_aligned"] = np.asarray(theta_info["theta_video_aligned"], dtype=float)
         aux["theta_sensor_from_video"] = np.asarray(theta_info["theta_sensor_aligned"], dtype=float)
         aux["theta_sensor_from_video_sparse"] = np.asarray(theta_info["theta_sensor_aligned_sparse"], dtype=float)
+        theta_sensor_from_video = aux["theta_sensor_from_video"]
+        theta_dot_from_video_fd = np.full_like(theta_sensor_from_video, np.nan, dtype=float)
+        finite = np.isfinite(theta_sensor_from_video)
+        if np.sum(finite) >= 2:
+            valid_idx = np.where(finite)[0]
+            td = np.diff(theta_sensor_from_video[valid_idx]) / float(sensor_dt)
+            theta_dot_from_video_fd[valid_idx[1:]] = td
+            theta_dot_from_video_fd[valid_idx[0]] = td[0]
+        aux["theta_dot_sensor_from_video_fd"] = theta_dot_from_video_fd
         aux["theta_alignment"] = {
             "offset_s": float(theta_info["offset_s"]),
             "sign": int(theta_info["sign"]),
@@ -370,11 +387,15 @@ def load_bab_with_video(
 # ---------------------------------------------------------------------
 
 class FrameStateDataset(TorchDataset):
-    """Per-frame (image, θ) dataset for encoder training.
+    """Per-sample frame dataset for encoder training.
 
-    The encoder is trained to predict position ``θ`` only; velocity ``θ̇``
-    is obtained from finite differences of consecutive encoder outputs in
-    the composite ``EncOdeDecModel``.
+    - ``encoder_fd`` mode: input is current frame and target is ``[theta]``.
+      Velocity is obtained from finite differences of consecutive encoder outputs.
+    - ``full_encoder`` mode: input is ``concat(current, current-prev)`` and
+      target is ``[theta, theta_dot_fd]`` where ``theta_dot_fd`` is computed
+      by finite differences on consecutive labels.
+        - ``late_fusion`` mode: input is ``concat(current, previous)`` and
+            target is ``[theta, theta_dot_fd]``.
     """
 
     def __init__(
@@ -384,11 +405,17 @@ class FrameStateDataset(TorchDataset):
         frame_index_map: np.ndarray,
         *,
         indices: Optional[np.ndarray] = None,
+        encoder_velocity_mode: str = "encoder_fd",
     ) -> None:
         self.data = data
         self.frames = frames
         self.frame_index_map = frame_index_map
         self.indices = np.arange(len(data)) if indices is None else np.asarray(indices)
+        self.encoder_velocity_mode = encoder_velocity_mode
+        if self.encoder_velocity_mode not in {"encoder_fd", "full_encoder", "late_fusion"}:
+            raise ValueError(
+                f"Unsupported encoder_velocity_mode: {self.encoder_velocity_mode}"
+            )
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -396,16 +423,37 @@ class FrameStateDataset(TorchDataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
         i = int(self.indices[idx])
         frame_idx = int(self.frame_index_map[i])
-        frame_tensor = torch.from_numpy(normalize_frame(self.frames[frame_idx]))
+        i_prev = max(0, i - 1)
+        frame_idx_prev = int(self.frame_index_map[i_prev])
+
+        frame_now = normalize_frame(self.frames[frame_idx])
+        frame_prev = normalize_frame(self.frames[frame_idx_prev])
+        if self.encoder_velocity_mode == "full_encoder":
+            frame_delta = frame_now - frame_prev
+            frame_in = np.concatenate([frame_now, frame_delta], axis=0)
+        elif self.encoder_velocity_mode == "late_fusion":
+            frame_in = np.concatenate([frame_now, frame_prev], axis=0)
+        else:
+            frame_in = frame_now
+        frame_tensor = torch.from_numpy(frame_in)
+
         theta = float(self.data.y[i])
-        # Encoder target is θ only (1-D); velocity comes from finite
-        # differences of two consecutive encoder outputs.
-        state = torch.tensor([theta], dtype=torch.float32)
+        dt = 1.0 / self.data.sampling_rate if self.data.sampling_rate > 0 else 1.0
+        theta_prev = float(self.data.y[i_prev])
+        theta_dot_fd = (theta - theta_prev) / float(dt)
+        if self.encoder_velocity_mode in {"full_encoder", "late_fusion"}:
+            state = torch.tensor([theta, theta_dot_fd], dtype=torch.float32)
+        else:
+            # Encoder target is θ only (1-D); velocity comes from finite
+            # differences of two consecutive encoder outputs.
+            state = torch.tensor([theta], dtype=torch.float32)
         meta = {
             "dataset_name": self.data.name,
             "i": i,
             "t": float(self.data.t[i]),
             "frame_idx": frame_idx,
+            "frame_idx_prev": frame_idx_prev,
+            "theta_dot_fd": float(theta_dot_fd),
         }
         return frame_tensor, state, meta
 
@@ -421,9 +469,27 @@ class FrameStateDataset(TorchDataset):
         val_idx = self.indices[n_train : n_train + n_val]
         test_idx = self.indices[n_train + n_val :]
         return (
-            FrameStateDataset(self.data, self.frames, self.frame_index_map, indices=train_idx),
-            FrameStateDataset(self.data, self.frames, self.frame_index_map, indices=val_idx),
-            FrameStateDataset(self.data, self.frames, self.frame_index_map, indices=test_idx),
+            FrameStateDataset(
+                self.data,
+                self.frames,
+                self.frame_index_map,
+                indices=train_idx,
+                encoder_velocity_mode=self.encoder_velocity_mode,
+            ),
+            FrameStateDataset(
+                self.data,
+                self.frames,
+                self.frame_index_map,
+                indices=val_idx,
+                encoder_velocity_mode=self.encoder_velocity_mode,
+            ),
+            FrameStateDataset(
+                self.data,
+                self.frames,
+                self.frame_index_map,
+                indices=test_idx,
+                encoder_velocity_mode=self.encoder_velocity_mode,
+            ),
         )
 
 

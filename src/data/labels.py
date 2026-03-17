@@ -156,12 +156,18 @@ def _parse_simple_keypoint_csv(
     else:
         theta = keypoints_to_theta(keypoints[:, :2], keypoints[:, 2:4]).astype(float)
 
+    theta_dot = None
+    if "theta_dot_deg_s" in rows[0]:
+        theta_dot = _col("theta_dot_deg_s")
+
     out: Dict[str, np.ndarray] = {
         "frame": frame,
         "t_s": t_s,
         "keypoints": keypoints,
         "theta_deg": theta,
     }
+    if theta_dot is not None:
+        out["theta_dot_deg_s"] = theta_dot
     if conf_min is not None:
         out["confidence_min"] = conf_min
     return out
