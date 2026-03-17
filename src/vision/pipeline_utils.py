@@ -198,7 +198,7 @@ def evaluate_and_plot_encoder(
     pred = predict_encoder_framewise(encoder, plot_source, device=device)
     theta_video = _select_theta_video_labels(aux, pred["idx"])
     theta_dot_true = _select_theta_dot_true(plot_source, aux, pred["idx"])
-    theta_dot_fd = _select_theta_dot_fd(aux, pred["idx"])
+    theta_dot_fd = _select_theta_dot_label_fd(aux, pred["idx"], pred["t"])
     theta_dot_pred = _select_theta_dot_pred(
         pred["pred"],
         pred["t"],
@@ -643,11 +643,19 @@ def _select_theta_dot_true(plot_source, aux: dict[str, Any], indices: np.ndarray
     return None
 
 
-def _select_theta_dot_fd(aux: dict[str, Any], indices: np.ndarray) -> np.ndarray | None:
-    theta_dot_fd = aux.get("theta_dot_sensor_fd")
-    if theta_dot_fd is None:
-        return None
-    return np.asarray(theta_dot_fd, dtype=float)[indices]
+def _select_theta_dot_label_fd(
+    aux: dict[str, Any],
+    indices: np.ndarray,
+    t: np.ndarray,
+) -> np.ndarray | None:
+    for key in ("theta_sensor_from_video_sparse", "theta_sensor_from_video"):
+        values = aux.get(key)
+        if values is None:
+            continue
+        theta = np.asarray(values, dtype=float)[indices]
+        if np.any(np.isfinite(theta)):
+            return _finite_difference_finite_series(theta, np.asarray(t, dtype=float))
+    return None
 
 
 def _select_theta_dot_pred(
@@ -685,6 +693,29 @@ def _finite_difference_series(values: np.ndarray, t: np.ndarray) -> np.ndarray:
         out[0] = out[1]
     else:
         out[:] = 0.0
+    return out
+
+
+def _finite_difference_finite_series(values: np.ndarray, t: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=float).reshape(-1)
+    t = np.asarray(t, dtype=float).reshape(-1)
+    if values.size != t.size:
+        raise ValueError("values and t must have matching lengths.")
+
+    out = np.full_like(values, np.nan, dtype=float)
+    finite_idx = np.where(np.isfinite(values) & np.isfinite(t))[0]
+    if finite_idx.size < 2:
+        return out
+
+    dt = np.diff(t[finite_idx])
+    dy = np.diff(values[finite_idx])
+    valid = np.abs(dt) > 1e-12
+    if not np.any(valid):
+        return out
+
+    deriv_idx = finite_idx[1:][valid]
+    out[deriv_idx] = dy[valid] / dt[valid]
+    out[finite_idx[0]] = out[deriv_idx[0]]
     return out
 
 

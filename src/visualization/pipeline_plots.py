@@ -76,12 +76,16 @@ def plot_video_to_sensor(
                 linestyle="--",
             )
         if theta_dot_fd is not None:
-            theta_dot_ax.plot(
-                t,
-                theta_dot_fd,
-                label="sensor theta_dot (finite diff)",
-                linewidth=1.0,
-                alpha=0.9,
+            finite = np.isfinite(theta_dot_fd)
+            theta_dot_ax.scatter(
+                t[finite],
+                theta_dot_fd[finite],
+                label="video theta_dot label (aligned FD)",
+                marker="x",
+                s=28,
+                linewidths=0.9,
+                alpha=0.8,
+                zorder=3,
                 c="tab:green",
             )
         theta_dot_ax.set_ylabel("theta_dot [deg/s]")
