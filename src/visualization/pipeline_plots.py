@@ -20,15 +20,35 @@ def plot_video_to_sensor(
     theta_true: np.ndarray,
     theta_pred: np.ndarray,
     theta_video_label: Optional[np.ndarray] = None,
+    *,
+    theta_dot_true: Optional[np.ndarray] = None,
+    theta_dot_pred: Optional[np.ndarray] = None,
+    theta_dot_fd: Optional[np.ndarray] = None,
+    theta_dot_pred_label: str = "encoder theta_dot (video->sensor)",
 ) -> None:
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(t, theta_true, label="sensor theta (true)", linewidth=1.0)
-    ax.plot(t, theta_pred, label="encoder theta (video->sensor)", linewidth=1.0, linestyle="--")
+    has_theta_dot = any(
+        arr is not None for arr in (theta_dot_true, theta_dot_pred, theta_dot_fd)
+    )
+    if has_theta_dot:
+        fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+        theta_ax, theta_dot_ax = axes
+    else:
+        fig, theta_ax = plt.subplots(figsize=(12, 4))
+        theta_dot_ax = None
+
+    theta_ax.plot(t, theta_true, label="sensor theta (true)", linewidth=1.0)
+    theta_ax.plot(
+        t,
+        theta_pred,
+        label="encoder theta (video->sensor)",
+        linewidth=1.0,
+        linestyle="--",
+    )
     if theta_video_label is not None and np.any(np.isfinite(theta_video_label)):
         finite = np.isfinite(theta_video_label)
-        ax.scatter(
+        theta_ax.scatter(
             t[finite],
             theta_video_label[finite],
             label="video theta label (aligned)",
@@ -39,11 +59,38 @@ def plot_video_to_sensor(
             zorder=3,
             c="tab:green",
         )
-    ax.set_title("Video -> Sensor")
-    ax.set_xlabel("time [s]")
-    ax.set_ylabel("theta [deg]")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
+    theta_ax.set_title("Video -> Sensor")
+    theta_ax.set_ylabel("theta [deg]")
+    theta_ax.grid(True, alpha=0.3)
+    theta_ax.legend()
+
+    if theta_dot_ax is not None:
+        if theta_dot_true is not None:
+            theta_dot_ax.plot(t, theta_dot_true, label="sensor theta_dot (true)", linewidth=1.0)
+        if theta_dot_pred is not None:
+            theta_dot_ax.plot(
+                t,
+                theta_dot_pred,
+                label=theta_dot_pred_label,
+                linewidth=1.0,
+                linestyle="--",
+            )
+        if theta_dot_fd is not None:
+            theta_dot_ax.plot(
+                t,
+                theta_dot_fd,
+                label="sensor theta_dot (finite diff)",
+                linewidth=1.0,
+                alpha=0.9,
+                c="tab:green",
+            )
+        theta_dot_ax.set_ylabel("theta_dot [deg/s]")
+        theta_dot_ax.set_xlabel("time [s]")
+        theta_dot_ax.grid(True, alpha=0.3)
+        theta_dot_ax.legend()
+    else:
+        theta_ax.set_xlabel("time [s]")
+
     fig.tight_layout()
     fig.savefig(out_path, dpi=180)
     plt.close(fig)

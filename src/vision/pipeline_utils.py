@@ -197,6 +197,18 @@ def evaluate_and_plot_encoder(
     plot_source = dataset if plot_dataset is None else plot_dataset
     pred = predict_encoder_framewise(encoder, plot_source, device=device)
     theta_video = _select_theta_video_labels(aux, pred["idx"])
+    theta_dot_true = _select_theta_dot_true(plot_source, aux, pred["idx"])
+    theta_dot_fd = _select_theta_dot_fd(aux, pred["idx"])
+    theta_dot_pred = _select_theta_dot_pred(
+        pred["pred"],
+        pred["t"],
+        encoder_velocity_mode=getattr(plot_source, "encoder_velocity_mode", "encoder_fd"),
+    )
+    theta_dot_pred_label = (
+        "encoder theta_dot (video->sensor)"
+        if pred["pred"].ndim == 2 and pred["pred"].shape[1] >= 2
+        else "encoder theta_dot (FD from theta pred)"
+    )
 
     plot_video_to_sensor(
         run_dir / "plot_video_to_sensor.png",
@@ -204,6 +216,10 @@ def evaluate_and_plot_encoder(
         pred["true"][:, 0],
         pred["pred"][:, 0],
         theta_video_label=theta_video,
+        theta_dot_true=theta_dot_true,
+        theta_dot_pred=theta_dot_pred,
+        theta_dot_fd=theta_dot_fd,
+        theta_dot_pred_label=theta_dot_pred_label,
     )
     return metrics, pred
 
@@ -614,6 +630,62 @@ def _select_theta_video_labels(aux: dict[str, Any], indices: np.ndarray) -> np.n
         if values is not None:
             return np.asarray(values, dtype=float)[indices]
     return None
+
+
+def _select_theta_dot_true(plot_source, aux: dict[str, Any], indices: np.ndarray) -> np.ndarray | None:
+    data = getattr(plot_source, "data", None)
+    if data is not None and getattr(data, "y_dot", None) is not None:
+        return np.asarray(data.y_dot, dtype=float)[indices]
+
+    theta_dot_fd = aux.get("theta_dot_sensor_fd")
+    if theta_dot_fd is not None:
+        return np.asarray(theta_dot_fd, dtype=float)[indices]
+    return None
+
+
+def _select_theta_dot_fd(aux: dict[str, Any], indices: np.ndarray) -> np.ndarray | None:
+    theta_dot_fd = aux.get("theta_dot_sensor_fd")
+    if theta_dot_fd is None:
+        return None
+    return np.asarray(theta_dot_fd, dtype=float)[indices]
+
+
+def _select_theta_dot_pred(
+    pred: np.ndarray,
+    t: np.ndarray,
+    *,
+    encoder_velocity_mode: str,
+) -> np.ndarray | None:
+    pred_arr = np.asarray(pred, dtype=float)
+    if pred_arr.ndim != 2 or pred_arr.shape[0] == 0:
+        return None
+    if pred_arr.shape[1] >= 2 and encoder_velocity_mode in {"full_encoder", "late_fusion"}:
+        return pred_arr[:, 1]
+    return _finite_difference_series(pred_arr[:, 0], np.asarray(t, dtype=float))
+
+
+def _finite_difference_series(values: np.ndarray, t: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=float).reshape(-1)
+    t = np.asarray(t, dtype=float).reshape(-1)
+    if values.size != t.size:
+        raise ValueError("values and t must have matching lengths.")
+    out = np.full_like(values, np.nan, dtype=float)
+    if values.size < 2:
+        return np.nan_to_num(out, nan=0.0)
+
+    dt = np.diff(t)
+    dy = np.diff(values)
+    valid = np.abs(dt) > 1e-12
+    out[1:][valid] = dy[valid] / dt[valid]
+    finite = np.isfinite(out)
+    if np.any(finite[1:]):
+        first_valid = int(np.where(finite)[0][0])
+        out[0] = out[first_valid]
+    elif np.isfinite(out[1]):
+        out[0] = out[1]
+    else:
+        out[:] = 0.0
+    return out
 
 
 def _maybe_array(values, *, dtype=float):

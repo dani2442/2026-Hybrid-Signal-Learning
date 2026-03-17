@@ -112,6 +112,25 @@ def _theta_series_for_segment(
     return target_t, out
 
 
+def _is_sparse_label_series(
+    sample_t: np.ndarray,
+    *,
+    video_fps: float,
+    n_video_frames: int,
+    sparse_fraction: float = 0.25,
+) -> bool:
+    """Infer whether a theta label series is sparse relative to the video span."""
+    sample_t = np.asarray(sample_t, dtype=float)
+    finite_t = sample_t[np.isfinite(sample_t)]
+    if finite_t.size == 0:
+        return False
+
+    total_frames = int(n_video_frames)
+    max_frame_from_time = int(np.floor(np.max(finite_t) * float(video_fps))) + 1
+    total_frames = max(total_frames, max_frame_from_time)
+    return int(finite_t.size) < float(sparse_fraction) * float(total_frames)
+
+
 # ---------------------------------------------------------------------
 # Public loading API
 # ---------------------------------------------------------------------
@@ -296,13 +315,19 @@ def load_bab_with_video(
         theta_csv = load_theta_csv(theta_labels_csv, fps=video_fps)
         theta_t = theta_csv["t_s"]
         theta_v = theta_csv["theta_deg"]
+        is_sparse_labels = _is_sparse_label_series(
+            theta_t,
+            video_fps=video_fps,
+            n_video_frames=len(frames),
+        )
     elif parsed_keypoints is not None:
         theta_t = parsed_keypoints["t_s"]
         theta_v = parsed_keypoints["theta_deg"]
-        # Detect sparse labels: if we have <25% of total video frames labelled
-        n_labels = len(theta_t)
-        n_total = len(frames) + frame_start
-        is_sparse_labels = n_labels < 0.25 * n_total
+        is_sparse_labels = _is_sparse_label_series(
+            theta_t,
+            video_fps=video_fps,
+            n_video_frames=len(frames),
+        )
 
     if theta_t is not None and theta_v is not None:
         # For sparse hand-labeled data, pass through without interpolating
