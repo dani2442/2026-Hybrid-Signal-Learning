@@ -24,6 +24,7 @@ def plot_video_to_sensor(
     theta_dot_true: Optional[np.ndarray] = None,
     theta_dot_pred: Optional[np.ndarray] = None,
     theta_dot_fd: Optional[np.ndarray] = None,
+    theta_dot_fd_label: str = "video theta_dot label (aligned FD)",
     theta_dot_pred_label: str = "encoder theta_dot (video->sensor)",
 ) -> None:
     import matplotlib.pyplot as plt
@@ -80,7 +81,7 @@ def plot_video_to_sensor(
             theta_dot_ax.scatter(
                 t[finite],
                 theta_dot_fd[finite],
-                label="video theta_dot label (aligned FD)",
+                label=theta_dot_fd_label,
                 marker="x",
                 s=28,
                 linewidths=0.9,

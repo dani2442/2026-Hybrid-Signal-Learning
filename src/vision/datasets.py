@@ -112,6 +112,40 @@ def _theta_series_for_segment(
     return target_t, out
 
 
+def _align_series_to_sensor_grid(
+    sensor_t: np.ndarray,
+    series_t: np.ndarray,
+    series_v: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Project an aligned video-space series onto the sensor timebase."""
+    sensor_t = np.asarray(sensor_t, dtype=float)
+    series_t = np.asarray(series_t, dtype=float)
+    series_v = np.asarray(series_v, dtype=float)
+
+    dense = np.full(sensor_t.shape, np.nan, dtype=float)
+    sparse = np.full(sensor_t.shape, np.nan, dtype=float)
+
+    valid = np.isfinite(series_t) & np.isfinite(series_v)
+    if not np.any(valid):
+        return dense, sparse
+
+    tt = series_t[valid]
+    yy = series_v[valid]
+    order = np.argsort(tt)
+    tt = tt[order]
+    yy = yy[order]
+
+    in_range = (sensor_t >= tt[0]) & (sensor_t <= tt[-1])
+    if np.any(in_range):
+        dense[in_range] = np.interp(sensor_t[in_range], tt, yy)
+
+    for t_v, y_v in zip(tt, yy):
+        idx = int(np.argmin(np.abs(sensor_t - t_v)))
+        sparse[idx] = y_v
+
+    return dense, sparse
+
+
 def _is_sparse_label_series(
     sample_t: np.ndarray,
     *,
@@ -310,11 +344,13 @@ def load_bab_with_video(
 
     theta_t = None
     theta_v = None
+    theta_dot_v = None
     is_sparse_labels = False
     if theta_labels_csv:
         theta_csv = load_theta_csv(theta_labels_csv, fps=video_fps)
         theta_t = theta_csv["t_s"]
         theta_v = theta_csv["theta_deg"]
+        theta_dot_v = theta_csv.get("theta_dot_deg_s")
         is_sparse_labels = _is_sparse_label_series(
             theta_t,
             video_fps=video_fps,
@@ -323,6 +359,7 @@ def load_bab_with_video(
     elif parsed_keypoints is not None:
         theta_t = parsed_keypoints["t_s"]
         theta_v = parsed_keypoints["theta_deg"]
+        theta_dot_v = parsed_keypoints.get("theta_dot_deg_s")
         is_sparse_labels = _is_sparse_label_series(
             theta_t,
             video_fps=video_fps,
@@ -340,6 +377,16 @@ def load_bab_with_video(
             frame_start=frame_start if use_led_sync else 0,
             keep_sparse=is_sparse_labels,
         )
+        theta_dot_video_segment = None
+        if theta_dot_v is not None:
+            _, theta_dot_video_segment = _theta_series_for_segment(
+                theta_t,
+                theta_dot_v,
+                n_video_frames=len(frames),
+                video_fps=video_fps,
+                frame_start=frame_start if use_led_sync else 0,
+                keep_sparse=is_sparse_labels,
+            )
 
         # When LED sync is used, tighten the offset search range.
         # The LED frame already provides good temporal alignment; we only
@@ -383,6 +430,21 @@ def load_bab_with_video(
         aux["theta_video_aligned"] = np.asarray(theta_info["theta_video_aligned"], dtype=float)
         aux["theta_sensor_from_video"] = np.asarray(theta_info["theta_sensor_aligned"], dtype=float)
         aux["theta_sensor_from_video_sparse"] = np.asarray(theta_info["theta_sensor_aligned_sparse"], dtype=float)
+        if theta_dot_video_segment is not None:
+            theta_dot_video_aligned = (
+                np.asarray(theta_dot_video_segment, dtype=float)
+                * float(theta_info["sign"])
+                * float(theta_info["alpha"])
+            )
+            theta_dot_sensor_from_video, theta_dot_sensor_from_video_sparse = _align_series_to_sensor_grid(
+                data.t,
+                np.asarray(theta_info["video_t_aligned"], dtype=float),
+                theta_dot_video_aligned,
+            )
+            aux["theta_dot_video_raw_segment"] = np.asarray(theta_dot_video_segment, dtype=float)
+            aux["theta_dot_video_aligned"] = theta_dot_video_aligned
+            aux["theta_dot_sensor_from_video"] = theta_dot_sensor_from_video
+            aux["theta_dot_sensor_from_video_sparse"] = theta_dot_sensor_from_video_sparse
         theta_sensor_from_video = aux["theta_sensor_from_video"]
         theta_dot_from_video_fd = np.full_like(theta_sensor_from_video, np.nan, dtype=float)
         finite = np.isfinite(theta_sensor_from_video)

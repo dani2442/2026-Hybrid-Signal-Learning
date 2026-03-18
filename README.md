@@ -58,13 +58,16 @@ hybrid_modeling/
 │   ├── core.py                       # Dataset registry, loading, preprocessing, velocity estimation
 │   └── video.py                      # Optional video synchronization utilities
 │
-├── data/                             # Raw .mat experiment files (auto-downloaded if missing)
-│   ├── 01_rampa_positiva.mat
-│   ├── 02_rampa_negativa.mat
-│   ├── 03_random_steps_01..04.mat
-│   ├── 04_swept_sine.mat
-│   ├── 05_multisine_01.mat
-│   └── 06_multisine_02.mat
+├── data/
+│   ├── sensors/                      # Raw .mat experiment files (auto-downloaded if missing)
+│   │   ├── 01_rampa_positiva.mat
+│   │   ├── 02_rampa_negativa.mat
+│   │   ├── 03_random_steps_01..04.mat
+│   │   ├── 04_swept_sine.mat
+│   │   ├── 05_multisine_01.mat
+│   │   └── 06_multisine_02.mat
+│   ├── videos/
+│   └── labels/
 │
 ├── hybrid_signal_learning/           # Core library
 │   ├── __init__.py                   # Public API re-exports
@@ -165,7 +168,7 @@ The datasets come from a **Ball-and-Beam (BAB)** experimental testbed for nonlin
 - **Trigger-based cropping** — signals are trimmed using the trigger channel to remove idle regions.
 - **Resampling** — default decimation factor of 50 reduces sampling rate for efficiency.
 - **Velocity estimation** — $\dot{y}$ is computed via configurable methods: `central` differences (default), Savitzky–Golay filter, spline derivative, Butterworth filter, or total-variation regularization.
-- **Auto-download** — missing `.mat` files are automatically fetched from the [sysid repository](https://github.com/helonayala/sysid).
+- **Auto-download** — missing `.mat` files are automatically fetched from the [sysid repository](https://github.com/helonayala/sysid) into `data/sensors/`.
 
 ---
 
@@ -556,7 +559,28 @@ For the built-in BAB datasets:
 srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_pipeline.py \
     --dataset swept_sine \
     --mode separate \
-    --ode-model linear_physics
+    --ode-model linear_physics \
+    --encoder-velocity-mode encoder_fd
+
+srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_pipeline.py \
+    --dataset swept_sine \
+    --mode separate \
+    --ode-model linear_physics \
+    --encoder-velocity-mode full_encoder
+
+  srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_pipeline.py \
+    --dataset swept_sine \
+    --mode separate \
+    --ode-model linear_physics \
+    --encoder-velocity-mode late_fusion
+
+
+srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_pipeline.py \
+    --dataset multisine_05 \
+    --mode separate \
+    --ode-model linear_physics \
+    --encoder-velocity-mode full_encoder
+
 
 srun -M tinygpu --gres=gpu:1 --time=02:00:00 .venv/bin/python examples/run_pipeline.py \
     --dataset multisine_05 \

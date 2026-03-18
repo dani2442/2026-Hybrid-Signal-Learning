@@ -296,7 +296,8 @@ class Dataset:
             y_dot_method: Derivative method ('savgol' or 'central')
             savgol_window: Savitzky-Golay window length
             savgol_poly: Savitzky-Golay polynomial order
-            data_dir: Local directory containing dataset files
+            data_dir: Data root directory. Sensor .mat files are resolved
+                from ``<data_dir>/sensors`` (or ``data/sensors`` by default).
         """
         import scipy.io
 

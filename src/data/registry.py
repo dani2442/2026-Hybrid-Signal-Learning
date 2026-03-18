@@ -26,8 +26,19 @@ def _project_data_root() -> Path:
     return Path(__file__).resolve().parents[2] / "data"
 
 
+def _normalize_data_root(data_root: Optional[str] = None) -> Path:
+    """Return canonical data root.
+
+    Accepts either ``<project>/data`` or ``<project>/data/sensors`` and
+    normalizes both to ``<project>/data`` so sensor files always live under
+    ``data/sensors``.
+    """
+    root = Path(data_root) if data_root is not None else _project_data_root()
+    return root.parent if root.name == "sensors" else root
+
+
 def _data_subdir(name: str, data_root: Optional[str] = None) -> Path:
-    return Path(data_root or _project_data_root()) / name
+    return _normalize_data_root(data_root) / name
 
 
 def sensors_dir(data_root: Optional[str] = None) -> Path:

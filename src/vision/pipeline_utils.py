@@ -198,7 +198,7 @@ def evaluate_and_plot_encoder(
     pred = predict_encoder_framewise(encoder, plot_source, device=device)
     theta_video = _select_theta_video_labels(aux, pred["idx"])
     theta_dot_true = _select_theta_dot_true(plot_source, aux, pred["idx"])
-    theta_dot_fd = _select_theta_dot_label_fd(aux, pred["idx"], pred["t"])
+    theta_dot_fd, theta_dot_fd_label = _select_theta_dot_label(aux, pred["idx"], pred["t"])
     theta_dot_pred = _select_theta_dot_pred(
         pred["pred"],
         pred["t"],
@@ -219,6 +219,7 @@ def evaluate_and_plot_encoder(
         theta_dot_true=theta_dot_true,
         theta_dot_pred=theta_dot_pred,
         theta_dot_fd=theta_dot_fd,
+        theta_dot_fd_label=theta_dot_fd_label,
         theta_dot_pred_label=theta_dot_pred_label,
     )
     return metrics, pred
@@ -643,19 +644,30 @@ def _select_theta_dot_true(plot_source, aux: dict[str, Any], indices: np.ndarray
     return None
 
 
-def _select_theta_dot_label_fd(
+def _select_theta_dot_label(
     aux: dict[str, Any],
     indices: np.ndarray,
     t: np.ndarray,
-) -> np.ndarray | None:
+) -> tuple[np.ndarray | None, str]:
+    for key in ("theta_dot_sensor_from_video_sparse", "theta_dot_sensor_from_video"):
+        values = aux.get(key)
+        if values is None:
+            continue
+        theta_dot = np.asarray(values, dtype=float)[indices]
+        if np.any(np.isfinite(theta_dot)):
+            return theta_dot, "video theta_dot label (aligned)"
+
     for key in ("theta_sensor_from_video_sparse", "theta_sensor_from_video"):
         values = aux.get(key)
         if values is None:
             continue
         theta = np.asarray(values, dtype=float)[indices]
         if np.any(np.isfinite(theta)):
-            return _finite_difference_finite_series(theta, np.asarray(t, dtype=float))
-    return None
+            return (
+                _finite_difference_finite_series(theta, np.asarray(t, dtype=float)),
+                "video theta_dot label (aligned FD)",
+            )
+    return None, "video theta_dot label (aligned FD)"
 
 
 def _select_theta_dot_pred(

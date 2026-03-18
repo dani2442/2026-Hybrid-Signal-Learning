@@ -316,7 +316,7 @@ def _parse_dlc_collected_data_csv(
 def load_theta_csv(
     theta_csv_path: str, fps: float = 30.0
 ) -> Dict[str, np.ndarray]:
-    """Load a theta CSV with columns ``t_s`` and ``theta_deg``."""
+    """Load a theta CSV with ``t_s``/``theta_deg`` and optional ``theta_dot_deg_s``."""
     path = Path(theta_csv_path)
     if not path.exists():
         raise FileNotFoundError(f"Theta CSV not found: {theta_csv_path}")
@@ -332,11 +332,17 @@ def load_theta_csv(
 
     t_vals: list[float] = []
     th_vals: list[float] = []
+    theta_dot_vals: list[float] | None = [] if "theta_dot_deg_s" in rows[0] else None
     for i, r in enumerate(rows):
         t_vals.append(_float_or(r.get("t_s"), i / float(fps)))
         th_vals.append(_float_or(r.get("theta_deg")))
+        if theta_dot_vals is not None:
+            theta_dot_vals.append(_float_or(r.get("theta_dot_deg_s")))
 
-    return {
+    out = {
         "t_s": np.asarray(t_vals, dtype=float),
         "theta_deg": np.asarray(th_vals, dtype=float),
     }
+    if theta_dot_vals is not None:
+        out["theta_dot_deg_s"] = np.asarray(theta_dot_vals, dtype=float)
+    return out
